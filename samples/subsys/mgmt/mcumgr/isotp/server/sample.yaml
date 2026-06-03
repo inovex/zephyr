@@ -1,0 +1,20 @@
+sample:
+  name: MCUmgr ISO-TP (CAN) SMP server
+  description: >
+    MCUmgr SMP server exposed over the ISO-TP (CAN, ISO 15765-2) transport.
+    Answers OS management commands received over a CAN bus.
+common:
+  tags:
+    - mcumgr
+    - smp
+    - canbus
+    - isotp
+  harness: console
+tests:
+  sample.mgmt.mcumgr.smp.isotp.server:
+    platform_allow:
+      - native_sim
+    integration_platforms:
+      - native_sim
+    depends_on:
+      - can

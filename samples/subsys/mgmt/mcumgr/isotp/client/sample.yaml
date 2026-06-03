@@ -1,0 +1,20 @@
+sample:
+  name: MCUmgr ISO-TP (CAN) SMP client
+  description: >
+    MCUmgr SMP client that sends OS management "echo" requests over the ISO-TP
+    (CAN, ISO 15765-2) transport to a companion SMP server.
+common:
+  tags:
+    - mcumgr
+    - smp
+    - canbus
+    - isotp
+  harness: console
+tests:
+  sample.mgmt.mcumgr.smp.isotp.client:
+    platform_allow:
+      - native_sim
+    integration_platforms:
+      - native_sim
+    depends_on:
+      - can

@@ -1,0 +1,121 @@
+#
+# Copyright (c) 2026, inovex GmbH
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+
+# The Kconfig file is dedicated to the ISO-TP (CAN) transport of MCUmgr
+# subsystem and provides Kconfig options to control aspects of
+# the transport.
+#
+# Options defined in this file should be prefixed:
+#  MCUMGR_TRANSPORT_ISOTP_
+
+menuconfig MCUMGR_TRANSPORT_ISOTP
+	bool "ISO-TP (CAN) MCUmgr SMP transport [EXPERIMENTAL]"
+	depends on ISOTP
+	select EXPERIMENTAL
+	help
+	  Enables handling of SMP commands received over ISO-TP (ISO 15765-2) on a
+	  CAN bus. ISO-TP performs its own segmentation and reassembly, so a single
+	  ISO-TP message carries one complete SMP packet; the MCUmgr reassembly
+	  layer is not used.
+
+	  The CAN controller used is the one selected by the "zephyr,canbus"
+	  devicetree chosen node.
+
+if MCUMGR_TRANSPORT_ISOTP
+
+config MCUMGR_TRANSPORT_ISOTP_RX_ID
+	hex "ISO-TP RX data CAN identifier"
+	default 0x80
+	help
+	  CAN identifier the transport listens on for incoming SMP data frames.
+	  Must match the TX data identifier (MCUMGR_TRANSPORT_ISOTP_TX_ID)
+	  configured on the peer.
+
+config MCUMGR_TRANSPORT_ISOTP_TX_ID
+	hex "ISO-TP TX data CAN identifier"
+	default 0x180
+	help
+	  CAN identifier used for outgoing SMP data frames. Must match the RX data
+	  identifier (MCUMGR_TRANSPORT_ISOTP_RX_ID) configured on the peer.
+
+config MCUMGR_TRANSPORT_ISOTP_EXTENDED_ID
+	bool "Use extended (29-bit) CAN identifiers"
+	help
+	  If enabled, the RX and TX identifiers are treated as extended 29-bit CAN
+	  identifiers (IDE). Otherwise standard 11-bit identifiers are used.
+
+config MCUMGR_TRANSPORT_ISOTP_CAN_FD
+	bool "Use CAN FD frames"
+	depends on CAN_FD_MODE
+	help
+	  If enabled, ISO-TP uses CAN FD frames (larger payload per frame). The CAN
+	  controller is configured into CAN FD mode when MCUMGR_TRANSPORT_ISOTP_AUTO_START
+	  is set. Otherwise classic CAN frames (8 bytes) are used.
+
+config MCUMGR_TRANSPORT_ISOTP_TX_DL
+	int "CAN FD transmit data length"
+	depends on MCUMGR_TRANSPORT_ISOTP_CAN_FD
+	default 64
+	help
+	  ISO-TP transmit frame data length (TX_DL) for CAN FD. Valid values are
+	  8, 12, 16, 20, 24, 32, 48 and 64.
+
+config MCUMGR_TRANSPORT_ISOTP_FC_BS
+	int "ISO-TP flow-control block size (BS)"
+	range 0 255
+	default 8
+	help
+	  Number of consecutive frames the peer may send before waiting for the
+	  next flow-control frame. 0 means the whole message is sent without
+	  intermediate flow control.
+
+config MCUMGR_TRANSPORT_ISOTP_FC_STMIN
+	int "ISO-TP flow-control minimum separation time (STmin)"
+	range 0 255
+	default 0
+	help
+	  Minimum separation time between consecutive frames requested from the
+	  peer. Values 0-127 are milliseconds; 241-249 encode 100us-900us. See
+	  ISO 15765-2.
+
+config MCUMGR_TRANSPORT_ISOTP_TX_TIMEOUT_MS
+	int "ISO-TP transmit timeout (ms)"
+	range 1 60000
+	default 5000
+	help
+	  Maximum time that the output function waits for an ISO-TP transmission
+	  to complete. When the time expires, the function returns an error. The
+	  ISO-TP layer continues the transfer until its own timers end it, and
+	  the transport then frees the buffer. Until then, a new transmission on
+	  the same channel fails with MGMT_ERR_EBUSY.
+
+config MCUMGR_TRANSPORT_ISOTP_AUTO_START
+	bool "Configure and start the CAN controller"
+	default y
+	help
+	  If enabled, the transport configures the CAN controller mode (including
+	  CAN FD if selected) and starts it during initialisation. Disable this if
+	  the application shares the CAN bus with other users and brings the
+	  controller up itself.
+
+config MCUMGR_TRANSPORT_ISOTP_THREAD_STACK_SIZE
+	int "ISO-TP receive thread stack size"
+	default 1024
+	help
+	  Stack size of the thread that blocks on incoming ISO-TP messages and
+	  forwards reassembled SMP packets for processing.
+
+config MCUMGR_TRANSPORT_ISOTP_THREAD_PRIORITY
+	int "ISO-TP receive thread priority"
+	default 3
+	help
+	  Priority of the ISO-TP receive thread.
+
+module = MCUMGR_TRANSPORT_ISOTP
+module-str = ISO-TP (CAN) MCUmgr SMP transport
+source "subsys/logging/Kconfig.template.log_config"
+
+endif # MCUMGR_TRANSPORT_ISOTP

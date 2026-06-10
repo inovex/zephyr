@@ -141,16 +141,6 @@ static const struct {
 	{ SMP_USER_DEFINED_TRANSPORT, "user" },
 };
 
-static const char *transport_name(int type)
-{
-	for (size_t i = 0; i < ARRAY_SIZE(transport_names); i++) {
-		if (transport_names[i].type == type) {
-			return transport_names[i].name;
-		}
-	}
-	return "?";
-}
-
 static int transport_by_name(const char *name)
 {
 	for (size_t i = 0; i < ARRAY_SIZE(transport_names); i++) {

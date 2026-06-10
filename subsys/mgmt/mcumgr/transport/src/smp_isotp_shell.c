@@ -7,14 +7,13 @@
 /** @file
  * @brief ISO-TP (CAN) transport backend for the MCUmgr SMP client shell.
  *
- * Binds the generic "smpc" shell (see smp_client_shell.c) to the ISO-TP (CAN)
- * transport and contributes the transport-specific subcommands under
- * "smpc isotp":
+ * Contributes the transport-specific subcommands under "smpc isotp":
  *
  *   smpc isotp target <rx_id> <tx_id>   retarget the peer's data CAN identifiers
  *
- * The generic shell calls smp_client_shell_transport_type() to discover which
- * SMP transport to bind its client to; this backend supplies SMP_ISOTP_TRANSPORT.
+ * "target" also makes ISO-TP the shell's active SMP transport (equivalent to
+ * "smpc transport isotp" first), so addressing a CAN node is a single command
+ * even when several transports are enabled.
  */
 
 #include <errno.h>
@@ -22,16 +21,9 @@
 
 #include <zephyr/shell/shell.h>
 #include <zephyr/shell/shell_string_conv.h>
+#include <zephyr/mgmt/mcumgr/smp/smp_client_shell.h>
 #include <zephyr/mgmt/mcumgr/transport/smp.h>
 #include <zephyr/mgmt/mcumgr/transport/smp_isotp.h>
-
-/* Tell the generic SMP client shell to bind its client to the ISO-TP transport
- * (overrides the weak default in smp_client_shell.c).
- */
-int smp_client_shell_transport_type(void)
-{
-	return SMP_ISOTP_TRANSPORT;
-}
 
 static int cmd_isotp_target(const struct shell *sh, size_t argc, char **argv)
 {
@@ -46,6 +38,12 @@ static int cmd_isotp_target(const struct shell *sh, size_t argc, char **argv)
 	if (err != 0) {
 		shell_error(sh, "invalid CAN identifier");
 		return -EINVAL;
+	}
+
+	rc = smp_client_shell_set_transport(SMP_ISOTP_TRANSPORT);
+	if (rc != 0) {
+		shell_error(sh, "selecting isotp transport failed: %d", rc);
+		return rc;
 	}
 
 	rc = smp_isotp_set_peer(rx_id, tx_id);

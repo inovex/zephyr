@@ -35,6 +35,26 @@ config SMP_CLIENT_CMD_MAX
 	help
 	  Define how many active requests that the client can handle
 
+config MCUMGR_SMP_CLIENT_SHELL
+	bool "MCUmgr SMP client shell (smpc)"
+	depends on SHELL
+	depends on FILE_SYSTEM
+	select MCUMGR_GRP_IMG_CLIENT
+	select MCUMGR_GRP_OS_CLIENT
+	select MCUMGR_GRP_OS_CLIENT_ECHO
+	select MCUMGR_GRP_OS_CLIENT_RESET
+	select MCUBOOT_BOOTUTIL_LIB
+	help
+	  Enables the interactive "smpc" shell that drives MCUmgr image, OS and
+	  file management over a registered SMP client transport, e.g. to perform
+	  firmware updates on remote nodes. Firmware images and files are read from
+	  a mounted file system.
+
+	  This is the transport-agnostic part; a transport backend (such as
+	  MCUMGR_SMP_CLIENT_SHELL_ISOTP) selects the transport and adds any
+	  transport-specific subcommands. The image management client requires the
+	  MCUboot bootutil library, which is selected automatically.
+
 module = MCUMGR_SMP_CLIENT
 module-str = mcumgr_smp_client
 source "subsys/logging/Kconfig.template.log_config"

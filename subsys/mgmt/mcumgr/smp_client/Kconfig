@@ -38,22 +38,56 @@ config SMP_CLIENT_CMD_MAX
 config MCUMGR_SMP_CLIENT_SHELL
 	bool "MCUmgr SMP client shell (smpc)"
 	depends on SHELL
-	depends on FILE_SYSTEM
-	select MCUMGR_GRP_IMG_CLIENT
 	select MCUMGR_GRP_OS_CLIENT
 	select MCUMGR_GRP_OS_CLIENT_ECHO
 	select MCUMGR_GRP_OS_CLIENT_RESET
+	help
+	  Enables the interactive "smpc" shell that drives MCUmgr management
+	  operations over a registered SMP client transport, e.g. to perform
+	  firmware updates on remote nodes.
+
+	  The base shell provides connectivity and OS commands only ("smpc echo",
+	  "smpc reset", "smpc transport"); image and file management commands are
+	  enabled separately below, so that e.g. an echo connectivity test does
+	  not pull in the file system or image management stacks.
+
+	  Transports are taken from the SMP client transport registry; with more
+	  than one transport enabled, select one at runtime with
+	  "smpc transport <name>". Transport backends (such as
+	  MCUMGR_SMP_CLIENT_SHELL_ISOTP) add transport-specific subcommands.
+
+if MCUMGR_SMP_CLIENT_SHELL
+
+config MCUMGR_SMP_CLIENT_SHELL_IMG
+	bool "Image management commands (smpc image ...)"
+	default y
+	select MCUMGR_GRP_IMG_CLIENT
 	select MCUBOOT_BOOTUTIL_LIB
 	help
-	  Enables the interactive "smpc" shell that drives MCUmgr image, OS and
-	  file management over a registered SMP client transport, e.g. to perform
-	  firmware updates on remote nodes. Firmware images and files are read from
-	  a mounted file system.
+	  Enables "smpc image list/test/confirm/erase" for inspecting and marking
+	  firmware images on the target. Protocol-only: needs the image management
+	  client and the MCUboot bootutil library (for image structures), but no
+	  local flash or file system.
 
-	  This is the transport-agnostic part; a transport backend (such as
-	  MCUMGR_SMP_CLIENT_SHELL_ISOTP) selects the transport and adds any
-	  transport-specific subcommands. The image management client requires the
-	  MCUboot bootutil library, which is selected automatically.
+config MCUMGR_SMP_CLIENT_SHELL_IMG_UPLOAD
+	bool "Image upload and upgrade commands (smpc image upload, smpc upgrade)"
+	default y
+	depends on MCUMGR_SMP_CLIENT_SHELL_IMG
+	depends on FILE_SYSTEM
+	help
+	  Enables "smpc image upload <file> [slot]" and the one-step
+	  "smpc upgrade <file> [test|confirm]" command. The firmware image is
+	  read from a mounted local file system.
+
+config MCUMGR_SMP_CLIENT_SHELL_FILE
+	bool "File transfer commands (smpc file ...)"
+	default y
+	depends on FILE_SYSTEM
+	help
+	  Enables "smpc file upload/download" for copying files between a mounted
+	  local file system and the target (MCUmgr FS management group).
+
+endif # MCUMGR_SMP_CLIENT_SHELL
 
 module = MCUMGR_SMP_CLIENT
 module-str = mcumgr_smp_client

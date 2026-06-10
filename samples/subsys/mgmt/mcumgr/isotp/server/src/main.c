@@ -27,7 +27,10 @@ int main(void)
 	LOG_INF("Listening for SMP requests on RX CAN id 0x%x, replying on 0x%x",
 		CONFIG_MCUMGR_TRANSPORT_ISOTP_RX_ID, CONFIG_MCUMGR_TRANSPORT_ISOTP_TX_ID);
 
+#ifdef CONFIG_MCUBOOT_IMGTOOL_SIGN_VERSION
+	/* Only defined when built with sysbuild + MCUboot (signed image). */
 	LOG_INF("App version: %s", CONFIG_MCUBOOT_IMGTOOL_SIGN_VERSION);
+#endif
 
 	return 0;
 }

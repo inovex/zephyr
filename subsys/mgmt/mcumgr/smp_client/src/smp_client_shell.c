@@ -13,20 +13,27 @@
  *
  * Command tree (transport-agnostic part):
  *   smpc echo <text>                    OS echo round-trip (connectivity check)
+ *   smpc reset                          reboot the target
+ *   smpc transport [name]               list or select the SMP transport
+ * With MCUMGR_SMP_CLIENT_SHELL_IMG:
  *   smpc image list                     read the target's image state
- *   smpc image upload <file> [slot]     upload a firmware image from a file
  *   smpc image test <hash>              mark an image for test (revert on reboot)
  *   smpc image confirm [hash]           confirm an image (or the running one)
  *   smpc image erase <slot>             erase an image slot
+ * With MCUMGR_SMP_CLIENT_SHELL_IMG_UPLOAD:
+ *   smpc image upload <file> [slot]     upload a firmware image from a file
+ *   smpc upgrade <file> [test|confirm]  upload -> mark -> reset, in one step
+ * With MCUMGR_SMP_CLIENT_SHELL_FILE:
  *   smpc file upload <local> <remote>   copy a local file to the target
  *   smpc file download <remote> <local> copy a file from the target
- *   smpc upgrade <file> [test|confirm]  upload -> mark -> reset, in one step
- *   smpc reset                          reboot the target
  *
- * Transport-specific commands are contributed by a backend that adds
- * subcommands to the "smpc" set and supplies the SMP transport type via
- * smp_client_shell_transport_type() (e.g. smp_isotp_shell.c registers
- * "smpc isotp" for ISO-TP/CAN peer retargeting).
+ * The client binds to a transport from the SMP client transport registry
+ * (smp_client_transport_register()). If exactly one transport is registered it
+ * is used automatically; with several, pick one at runtime with
+ * "smpc transport <name>". Transport backends contribute their own subcommands
+ * to the "smpc" set (e.g. smp_isotp_shell.c registers "smpc isotp" for
+ * ISO-TP/CAN peer retargeting) and may switch the active transport and attach
+ * per-transport client data via <zephyr/mgmt/mcumgr/smp/smp_client_shell.h>.
  *
  * The image and OS operations use Zephyr's img_mgmt/os_mgmt client libraries.
  * Zephyr has no fs_mgmt client, so the file commands implement the FS group
@@ -41,85 +48,207 @@
 #include <zephyr/sys/util.h>
 #include <zephyr/shell/shell.h>
 #include <zephyr/shell/shell_string_conv.h>
-#include <zephyr/fs/fs.h>
 #include <zephyr/net_buf.h>
-
-#include <zcbor_common.h>
-#include <zcbor_decode.h>
-#include <zcbor_encode.h>
 
 #include <zephyr/mgmt/mcumgr/mgmt/mgmt.h>
 #include <zephyr/mgmt/mcumgr/mgmt/mgmt_defines.h>
 #include <zephyr/mgmt/mcumgr/smp/smp.h>
 #include <zephyr/mgmt/mcumgr/smp/smp_client.h>
+#include <zephyr/mgmt/mcumgr/smp/smp_client_shell.h>
 #include <zephyr/mgmt/mcumgr/transport/smp.h>
+#include <zephyr/mgmt/mcumgr/grp/os_mgmt/os_mgmt_client.h>
+
+#ifdef CONFIG_MCUMGR_SMP_CLIENT_SHELL_IMG
 #include <zephyr/mgmt/mcumgr/grp/img_mgmt/img_mgmt.h>
 #include <zephyr/mgmt/mcumgr/grp/img_mgmt/img_mgmt_client.h>
-#include <zephyr/mgmt/mcumgr/grp/os_mgmt/os_mgmt_client.h>
-#include <zephyr/mgmt/mcumgr/grp/fs_mgmt/fs_mgmt.h>
+#endif
 
+#if defined(CONFIG_MCUMGR_SMP_CLIENT_SHELL_IMG_UPLOAD) || \
+	defined(CONFIG_MCUMGR_SMP_CLIENT_SHELL_FILE)
+#include <zephyr/fs/fs.h>
+#endif
+
+#ifdef CONFIG_MCUMGR_SMP_CLIENT_SHELL_FILE
+#include <zcbor_common.h>
+#include <zcbor_decode.h>
+#include <zcbor_encode.h>
+#include <zephyr/mgmt/mcumgr/grp/fs_mgmt/fs_mgmt.h>
+#endif
+
+#ifdef CONFIG_MCUMGR_SMP_CLIENT_SHELL_IMG
 /* Maximum number of image entries parsed from an "image list" response. */
 #define IMG_LIST_MAX 4
+/* SHA-256 image hash length in bytes / hex characters. */
+#define HASH_LEN     IMG_MGMT_DATA_SHA_LEN
+#endif
+
+#if defined(CONFIG_MCUMGR_SMP_CLIENT_SHELL_IMG_UPLOAD) || \
+	defined(CONFIG_MCUMGR_SMP_CLIENT_SHELL_FILE)
 /* RAM staging buffer for reading the local file during transfers. */
 #define STAGE_BUF_SZ 1024
+#endif
+
+#ifdef CONFIG_MCUMGR_SMP_CLIENT_SHELL_FILE
 /* Payload bytes per FS-group frame (kept well under the transport MTU). */
 #define FS_CHUNK_SZ  256
 /* Maximum remote/local path length accepted. */
 #define PATH_MAX_LEN 128
-/* SHA-256 image hash length in bytes / hex characters. */
-#define HASH_LEN     IMG_MGMT_DATA_SHA_LEN
 
 #define KEY_IS(k, lit) ((k).len == (sizeof(lit) - 1) && memcmp((k).value, (lit), (k).len) == 0)
+#endif
 
 static struct smp_client_object smp_client;
-static struct img_mgmt_client img_client;
 static struct os_mgmt_client os_client;
+#ifdef CONFIG_MCUMGR_SMP_CLIENT_SHELL_IMG
+static struct img_mgmt_client img_client;
 static struct mcumgr_image_data img_list_buf[IMG_LIST_MAX];
+#endif
 static bool clients_ready;
+/* Transport the client is currently bound to (enum smp_transport_type), or -1. */
+static int active_transport = -1;
+/* Per-transport client data handed to the transport's ud_init for each request
+ * (e.g. the destination address for UDP). Owned by the transport backend.
+ */
+static void *transport_priv;
 
+#if defined(CONFIG_MCUMGR_SMP_CLIENT_SHELL_IMG_UPLOAD) || \
+	defined(CONFIG_MCUMGR_SMP_CLIENT_SHELL_FILE)
 /* Shared by the file commands (shell runs single-threaded, so one buffer is
  * sufficient and the FS-client state is additionally guarded by fs_mutex).
  */
 static uint8_t stage_buf[STAGE_BUF_SZ];
+#endif
 
-/* Default SMP transport type. A transport backend (e.g. smp_isotp_shell.c)
- * overrides this; the weak default makes "no backend selected" fail cleanly.
+/* ---- transport selection --------------------------------------------------
+ *
+ * Transports register with the SMP client transport registry
+ * (smp_client_transport_register() in transport/src/smp.c) when SMP_CLIENT is
+ * enabled; the shell only maps names onto enum smp_transport_type and queries
+ * that registry, so any number of enabled transports can coexist.
  */
-__weak int smp_client_shell_transport_type(void)
+
+static const struct {
+	int type;
+	const char *name;
+} transport_names[] = {
+	{ SMP_SERIAL_TRANSPORT, "serial" },
+	{ SMP_BLUETOOTH_TRANSPORT, "bt" },
+	{ SMP_SHELL_TRANSPORT, "shell" },
+	{ SMP_UDP_IPV4_TRANSPORT, "udp" },
+	{ SMP_UDP_IPV6_TRANSPORT, "udp6" },
+	{ SMP_LORAWAN_TRANSPORT, "lorawan" },
+	{ SMP_ISOTP_TRANSPORT, "isotp" },
+	{ SMP_USER_DEFINED_TRANSPORT, "user" },
+};
+
+static const char *transport_name(int type)
 {
-	return -1;
+	for (size_t i = 0; i < ARRAY_SIZE(transport_names); i++) {
+		if (transport_names[i].type == type) {
+			return transport_names[i].name;
+		}
+	}
+	return "?";
+}
+
+static int transport_by_name(const char *name)
+{
+	for (size_t i = 0; i < ARRAY_SIZE(transport_names); i++) {
+		if (strcmp(transport_names[i].name, name) == 0) {
+			return transport_names[i].type;
+		}
+	}
+	return -ENOENT;
+}
+
+/* (Re)bind the client object and the management clients to a transport that is
+ * known to be registered. Safe to re-run: the shell is the only, synchronous
+ * user of the client object, so no request is in flight here.
+ */
+static int bind_transport(int type)
+{
+	int rc;
+
+	rc = smp_client_object_init(&smp_client, type);
+	if (rc != MGMT_ERR_EOK) {
+		return rc;
+	}
+
+	smp_client_object_set_data(&smp_client, transport_priv);
+#ifdef CONFIG_MCUMGR_SMP_CLIENT_SHELL_IMG
+	img_mgmt_client_init(&img_client, &smp_client, IMG_LIST_MAX, img_list_buf);
+#endif
+	os_mgmt_client_init(&os_client, &smp_client);
+	active_transport = type;
+	clients_ready = true;
+
+	return MGMT_ERR_EOK;
+}
+
+int smp_client_shell_set_transport(int smpt_type)
+{
+	if (smp_client_transport_get(smpt_type) == NULL) {
+		return -ENOENT;
+	}
+
+	if (clients_ready && active_transport == smpt_type) {
+		return 0;
+	}
+
+	/* Client data is owned by the previous transport's backend; drop it. */
+	transport_priv = NULL;
+
+	return bind_transport(smpt_type) == MGMT_ERR_EOK ? 0 : -EIO;
+}
+
+void smp_client_shell_set_transport_data(void *priv)
+{
+	transport_priv = priv;
+	if (clients_ready) {
+		smp_client_object_set_data(&smp_client, priv);
+	}
 }
 
 /* ---- helpers ------------------------------------------------------------- */
 
 static int ensure_clients(const struct shell *sh)
 {
+	int found = -1;
+	int count = 0;
 	int rc;
-	int transport;
 
 	if (clients_ready) {
 		return 0;
 	}
 
-	transport = smp_client_shell_transport_type();
-	if (transport < 0) {
-		shell_error(sh, "no SMP client shell transport backend enabled");
-		return -ENOTSUP;
+	/* Auto-bind only when the choice is unambiguous. */
+	for (size_t i = 0; i < ARRAY_SIZE(transport_names); i++) {
+		if (smp_client_transport_get(transport_names[i].type) != NULL) {
+			found = transport_names[i].type;
+			count++;
+		}
 	}
 
-	rc = smp_client_object_init(&smp_client, transport);
+	if (count == 0) {
+		shell_error(sh, "no SMP client transport registered (is one enabled and up?)");
+		return -ENODEV;
+	}
+	if (count > 1) {
+		shell_error(sh, "%d SMP client transports registered; select one with "
+			    "'smpc transport <name>'", count);
+		return -EINVAL;
+	}
+
+	rc = bind_transport(found);
 	if (rc != MGMT_ERR_EOK) {
-		shell_error(sh, "SMP client init failed: %d (is the transport up?)", rc);
+		shell_error(sh, "SMP client init failed: %d", rc);
 		return rc;
 	}
-
-	img_mgmt_client_init(&img_client, &smp_client, IMG_LIST_MAX, img_list_buf);
-	os_mgmt_client_init(&os_client, &smp_client);
-	clients_ready = true;
 
 	return 0;
 }
 
+#ifdef CONFIG_MCUMGR_SMP_CLIENT_SHELL_IMG
 static int parse_u32(const struct shell *sh, const char *s, uint32_t *out)
 {
 	int err = 0;
@@ -163,7 +292,9 @@ static void print_hash(const struct shell *sh, const char *prefix, const uint8_t
 	}
 	shell_print(sh, "%s%s", prefix, hex);
 }
+#endif /* CONFIG_MCUMGR_SMP_CLIENT_SHELL_IMG */
 
+#ifdef CONFIG_MCUMGR_SMP_CLIENT_SHELL_FILE
 /* ---- FS management client (hand-rolled; no fs_mgmt client in Zephyr) ------ */
 
 static struct {
@@ -362,6 +493,7 @@ static int fs_download_chunk(const char *name, size_t off, uint8_t *dst, size_t 
 	}
 	return fs_op.status;
 }
+#endif /* CONFIG_MCUMGR_SMP_CLIENT_SHELL_FILE */
 
 /* ---- command handlers ---------------------------------------------------- */
 
@@ -401,6 +533,50 @@ static int cmd_reset(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+static int cmd_transport(const struct shell *sh, size_t argc, char **argv)
+{
+	int type;
+	int rc;
+
+	if (argc == 1) {
+		int count = 0;
+
+		for (size_t i = 0; i < ARRAY_SIZE(transport_names); i++) {
+			if (smp_client_transport_get(transport_names[i].type) == NULL) {
+				continue;
+			}
+			shell_print(sh, "  %s%s", transport_names[i].name,
+				    (clients_ready &&
+				     active_transport == transport_names[i].type)
+					    ? " (active)" : "");
+			count++;
+		}
+		if (count == 0) {
+			shell_print(sh, "no SMP client transport registered");
+		}
+		return 0;
+	}
+
+	type = transport_by_name(argv[1]);
+	if (type < 0) {
+		shell_error(sh, "unknown transport '%s'", argv[1]);
+		return -EINVAL;
+	}
+
+	rc = smp_client_shell_set_transport(type);
+	if (rc == -ENOENT) {
+		shell_error(sh, "transport '%s' is not registered (enabled and up?)", argv[1]);
+		return rc;
+	} else if (rc != 0) {
+		shell_error(sh, "switching to '%s' failed: %d", argv[1], rc);
+		return rc;
+	}
+
+	shell_print(sh, "active transport: %s", argv[1]);
+	return 0;
+}
+
+#ifdef CONFIG_MCUMGR_SMP_CLIENT_SHELL_IMG
 static int cmd_image_list(const struct shell *sh, size_t argc, char **argv)
 {
 	struct mcumgr_image_state state;
@@ -432,6 +608,80 @@ static int cmd_image_list(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+static int cmd_image_test(const struct shell *sh, size_t argc, char **argv)
+{
+	struct mcumgr_image_state state;
+	uint8_t hash[HASH_LEN];
+	int rc;
+
+	if (ensure_clients(sh)) {
+		return -ENODEV;
+	}
+	if (parse_hash(sh, argv[1], hash)) {
+		return -EINVAL;
+	}
+
+	rc = img_mgmt_client_state_write(&img_client, (char *)hash, false, &state);
+	if (rc != MGMT_ERR_EOK) {
+		shell_error(sh, "test failed: %d", rc);
+		return rc;
+	}
+
+	shell_print(sh, "image marked for test");
+	return 0;
+}
+
+static int cmd_image_confirm(const struct shell *sh, size_t argc, char **argv)
+{
+	struct mcumgr_image_state state;
+	uint8_t hash[HASH_LEN];
+	char *hash_arg = NULL;
+	int rc;
+
+	if (ensure_clients(sh)) {
+		return -ENODEV;
+	}
+	if (argc == 2) {
+		if (parse_hash(sh, argv[1], hash)) {
+			return -EINVAL;
+		}
+		hash_arg = (char *)hash;
+	}
+
+	rc = img_mgmt_client_state_write(&img_client, hash_arg, true, &state);
+	if (rc != MGMT_ERR_EOK) {
+		shell_error(sh, "confirm failed: %d", rc);
+		return rc;
+	}
+
+	shell_print(sh, "image confirmed");
+	return 0;
+}
+
+static int cmd_image_erase(const struct shell *sh, size_t argc, char **argv)
+{
+	uint32_t slot;
+	int rc;
+
+	if (ensure_clients(sh)) {
+		return -ENODEV;
+	}
+	if (parse_u32(sh, argv[1], &slot)) {
+		return -EINVAL;
+	}
+
+	rc = img_mgmt_client_erase(&img_client, slot);
+	if (rc != MGMT_ERR_EOK) {
+		shell_error(sh, "erase failed: %d", rc);
+		return rc;
+	}
+
+	shell_print(sh, "slot %u erased", slot);
+	return 0;
+}
+#endif /* CONFIG_MCUMGR_SMP_CLIENT_SHELL_IMG */
+
+#ifdef CONFIG_MCUMGR_SMP_CLIENT_SHELL_IMG_UPLOAD
 /* Upload an image file to the given slot. Returns an MGMT_ERR/errno code. */
 static int image_upload_file(const struct shell *sh, const char *path, uint32_t slot)
 {
@@ -517,78 +767,69 @@ static int cmd_image_upload(const struct shell *sh, size_t argc, char **argv)
 	return image_upload_file(sh, argv[1], slot);
 }
 
-static int cmd_image_test(const struct shell *sh, size_t argc, char **argv)
+static int cmd_upgrade(const struct shell *sh, size_t argc, char **argv)
 {
 	struct mcumgr_image_state state;
-	uint8_t hash[HASH_LEN];
+	const char *path = argv[1];
+	bool confirm = false;
+	const uint8_t *hash = NULL;
 	int rc;
 
 	if (ensure_clients(sh)) {
 		return -ENODEV;
 	}
-	if (parse_hash(sh, argv[1], hash)) {
-		return -EINVAL;
-	}
-
-	rc = img_mgmt_client_state_write(&img_client, (char *)hash, false, &state);
-	if (rc != MGMT_ERR_EOK) {
-		shell_error(sh, "test failed: %d", rc);
-		return rc;
-	}
-
-	shell_print(sh, "image marked for test");
-	return 0;
-}
-
-static int cmd_image_confirm(const struct shell *sh, size_t argc, char **argv)
-{
-	struct mcumgr_image_state state;
-	uint8_t hash[HASH_LEN];
-	char *hash_arg = NULL;
-	int rc;
-
-	if (ensure_clients(sh)) {
-		return -ENODEV;
-	}
-	if (argc == 2) {
-		if (parse_hash(sh, argv[1], hash)) {
+	if (argc == 3) {
+		if (strcmp(argv[2], "confirm") == 0) {
+			confirm = true;
+		} else if (strcmp(argv[2], "test") != 0) {
+			shell_error(sh, "mode must be 'test' or 'confirm'");
 			return -EINVAL;
 		}
-		hash_arg = (char *)hash;
 	}
 
-	rc = img_mgmt_client_state_write(&img_client, hash_arg, true, &state);
+	rc = image_upload_file(sh, path, 0);
 	if (rc != MGMT_ERR_EOK) {
-		shell_error(sh, "confirm failed: %d", rc);
 		return rc;
 	}
 
-	shell_print(sh, "image confirmed");
-	return 0;
-}
-
-static int cmd_image_erase(const struct shell *sh, size_t argc, char **argv)
-{
-	uint32_t slot;
-	int rc;
-
-	if (ensure_clients(sh)) {
-		return -ENODEV;
-	}
-	if (parse_u32(sh, argv[1], &slot)) {
-		return -EINVAL;
-	}
-
-	rc = img_mgmt_client_erase(&img_client, slot);
+	/* Find the freshly uploaded (non-active) image and use its device-computed
+	 * hash to arm the test/confirm.
+	 */
+	rc = img_mgmt_client_state_read(&img_client, &state);
 	if (rc != MGMT_ERR_EOK) {
-		shell_error(sh, "erase failed: %d", rc);
+		shell_error(sh, "state read after upload failed: %d", rc);
+		return rc;
+	}
+	for (int i = 0; i < state.image_list_length; i++) {
+		if (!state.image_list[i].flags.active) {
+			hash = state.image_list[i].hash;
+			break;
+		}
+	}
+	if (hash == NULL) {
+		shell_error(sh, "no inactive image found to mark");
+		return -ENOENT;
+	}
+
+	rc = img_mgmt_client_state_write(&img_client, (char *)hash, confirm, &state);
+	if (rc != MGMT_ERR_EOK) {
+		shell_error(sh, "marking image failed: %d", rc);
+		return rc;
+	}
+	shell_print(sh, "image marked for %s; resetting target", confirm ? "confirm" : "test");
+
+	rc = os_mgmt_client_reset(&os_client);
+	if (rc != MGMT_ERR_EOK) {
+		shell_error(sh, "reset failed: %d", rc);
 		return rc;
 	}
 
-	shell_print(sh, "slot %u erased", slot);
+	shell_print(sh, "upgrade complete");
 	return 0;
 }
+#endif /* CONFIG_MCUMGR_SMP_CLIENT_SHELL_IMG_UPLOAD */
 
+#ifdef CONFIG_MCUMGR_SMP_CLIENT_SHELL_FILE
 static int cmd_file_upload(const struct shell *sh, size_t argc, char **argv)
 {
 	const char *local = argv[1];
@@ -724,79 +965,24 @@ static int cmd_file_download(const struct shell *sh, size_t argc, char **argv)
 	}
 	return rc;
 }
-
-static int cmd_upgrade(const struct shell *sh, size_t argc, char **argv)
-{
-	struct mcumgr_image_state state;
-	const char *path = argv[1];
-	bool confirm = false;
-	const uint8_t *hash = NULL;
-	int rc;
-
-	if (ensure_clients(sh)) {
-		return -ENODEV;
-	}
-	if (argc == 3) {
-		if (strcmp(argv[2], "confirm") == 0) {
-			confirm = true;
-		} else if (strcmp(argv[2], "test") != 0) {
-			shell_error(sh, "mode must be 'test' or 'confirm'");
-			return -EINVAL;
-		}
-	}
-
-	rc = image_upload_file(sh, path, 0);
-	if (rc != MGMT_ERR_EOK) {
-		return rc;
-	}
-
-	/* Find the freshly uploaded (non-active) image and use its device-computed
-	 * hash to arm the test/confirm.
-	 */
-	rc = img_mgmt_client_state_read(&img_client, &state);
-	if (rc != MGMT_ERR_EOK) {
-		shell_error(sh, "state read after upload failed: %d", rc);
-		return rc;
-	}
-	for (int i = 0; i < state.image_list_length; i++) {
-		if (!state.image_list[i].flags.active) {
-			hash = state.image_list[i].hash;
-			break;
-		}
-	}
-	if (hash == NULL) {
-		shell_error(sh, "no inactive image found to mark");
-		return -ENOENT;
-	}
-
-	rc = img_mgmt_client_state_write(&img_client, (char *)hash, confirm, &state);
-	if (rc != MGMT_ERR_EOK) {
-		shell_error(sh, "marking image failed: %d", rc);
-		return rc;
-	}
-	shell_print(sh, "image marked for %s; resetting target", confirm ? "confirm" : "test");
-
-	rc = os_mgmt_client_reset(&os_client);
-	if (rc != MGMT_ERR_EOK) {
-		shell_error(sh, "reset failed: %d", rc);
-		return rc;
-	}
-
-	shell_print(sh, "upgrade complete");
-	return 0;
-}
+#endif /* CONFIG_MCUMGR_SMP_CLIENT_SHELL_FILE */
 
 /* ---- command registration ------------------------------------------------ */
 
+#ifdef CONFIG_MCUMGR_SMP_CLIENT_SHELL_IMG
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_image,
 	SHELL_CMD_ARG(list, NULL, "List images on the target", cmd_image_list, 1, 0),
+#ifdef CONFIG_MCUMGR_SMP_CLIENT_SHELL_IMG_UPLOAD
 	SHELL_CMD_ARG(upload, NULL, "Upload firmware: upload <file> [slot]", cmd_image_upload, 2, 1),
+#endif
 	SHELL_CMD_ARG(test, NULL, "Mark image for test: test <hash>", cmd_image_test, 2, 0),
 	SHELL_CMD_ARG(confirm, NULL, "Confirm image: confirm [hash]", cmd_image_confirm, 1, 1),
 	SHELL_CMD_ARG(erase, NULL, "Erase a slot: erase <slot>", cmd_image_erase, 2, 0),
 	SHELL_SUBCMD_SET_END
 );
+#endif
 
+#ifdef CONFIG_MCUMGR_SMP_CLIENT_SHELL_FILE
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_file,
 	SHELL_CMD_ARG(upload, NULL, "Copy local->target: upload <local> <remote>", cmd_file_upload,
 		      3, 0),
@@ -804,6 +990,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_file,
 		      cmd_file_download, 3, 0),
 	SHELL_SUBCMD_SET_END
 );
+#endif
 
 /* Root "smpc" subcommand set. Transport backends add their own subcommands to
  * this set from their own translation units via SHELL_SUBCMD_ADD((smpc), ...).
@@ -811,10 +998,18 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_file,
 SHELL_SUBCMD_SET_CREATE(smp_client_shell_cmds, (smpc));
 
 SHELL_SUBCMD_ADD((smpc), echo, NULL, "OS echo round-trip: echo <text>", cmd_echo, 2, 0);
+SHELL_SUBCMD_ADD((smpc), transport, NULL, "List or select the SMP transport: transport [name]",
+		 cmd_transport, 1, 1);
+#ifdef CONFIG_MCUMGR_SMP_CLIENT_SHELL_IMG
 SHELL_SUBCMD_ADD((smpc), image, &sub_image, "Image management commands", NULL, 1, 0);
+#endif
+#ifdef CONFIG_MCUMGR_SMP_CLIENT_SHELL_FILE
 SHELL_SUBCMD_ADD((smpc), file, &sub_file, "File management commands", NULL, 1, 0);
+#endif
+#ifdef CONFIG_MCUMGR_SMP_CLIENT_SHELL_IMG_UPLOAD
 SHELL_SUBCMD_ADD((smpc), upgrade, NULL, "Upload+mark+reset: upgrade <file> [test|confirm]",
 		 cmd_upgrade, 2, 1);
+#endif
 SHELL_SUBCMD_ADD((smpc), reset, NULL, "Reset the target", cmd_reset, 1, 0);
 
 SHELL_CMD_REGISTER(smpc, &smp_client_shell_cmds, "MCUmgr SMP client control", NULL);

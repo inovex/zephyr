@@ -26,6 +26,23 @@ It uses the in-tree **SMP client shell** subsystem
   runtime via :c:func:`smp_isotp_set_peer`, so one controller can address many
   nodes in turn over one bus.
 
+The command groups are individually selectable: the base shell provides only
+``echo``/``reset``/``transport`` (so a bare connectivity test needs neither a
+file system nor the image stack), while
+:kconfig:option:`CONFIG_MCUMGR_SMP_CLIENT_SHELL_IMG`,
+:kconfig:option:`CONFIG_MCUMGR_SMP_CLIENT_SHELL_IMG_UPLOAD` and
+:kconfig:option:`CONFIG_MCUMGR_SMP_CLIENT_SHELL_FILE` (all default ``y``, the
+latter two gated on :kconfig:option:`CONFIG_FILE_SYSTEM`) add the ``image``,
+``image upload``/``upgrade`` and ``file`` commands.
+
+The shell binds to a transport from the SMP client transport registry. With a
+single transport enabled (as in this sample) it is used automatically; with
+several (e.g. ISO-TP plus UDP via
+:kconfig:option:`CONFIG_MCUMGR_SMP_CLIENT_SHELL_UDP`), pick one at runtime with
+``smpc transport <name>`` — or simply use a backend's ``target`` command
+(``smpc isotp target ...``, ``smpc udp target <ip> [port]``), which selects its
+transport as a side effect.
+
 The sample itself only mounts a **littlefs** at ``/lfs`` (the firmware/file
 source, manageable with the built-in ``fs`` shell) and prints startup status.
 
@@ -44,6 +61,7 @@ Shell commands
    smpc file download <remote> <local>  # copy a file from the target
    smpc upgrade <file> [test|confirm]   # upload -> mark -> reset, in one step
    smpc reset                           # reboot the target
+   smpc transport [name]                # list registered SMP transports / select one
    smpc isotp target <rx_id> <tx_id>    # (ISO-TP) select the peer node's CAN ids
 
 Addressing several nodes

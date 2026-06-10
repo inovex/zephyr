@@ -30,6 +30,38 @@ extern "C" {
  */
 extern struct smp_transport smp_isotp_transport;
 
+#if defined(CONFIG_MCUMGR_TRANSPORT_ISOTP_RUNTIME_PEER) || defined(__DOXYGEN__)
+/**
+ * @brief Retarget the ISO-TP transport to a different peer at runtime.
+ *
+ * Changes the data CAN identifiers used by the transport so a single node (e.g.
+ * a main controller) can address several peers in turn over one CAN bus. The
+ * flow control follows the data identifiers (ISO 15765-2 normal addressing).
+ *
+ * @p rx_id becomes the identifier the transport receives SMP data on (must
+ * match the peer's TX data identifier) and @p tx_id the identifier it transmits
+ * SMP data on (must match the peer's RX data identifier). The change to the RX
+ * identifier requires the receive filter to be reinstalled, which the receive
+ * thread performs within @kconfig{CONFIG_MCUMGR_TRANSPORT_ISOTP_RX_POLL_MS}.
+ *
+ * Do not call this while a transfer to the current peer is in progress; the
+ * intended use is to switch peers between complete SMP request/response
+ * exchanges.
+ *
+ * @note Requires @kconfig{CONFIG_MCUMGR_TRANSPORT_ISOTP_RUNTIME_PEER}.
+ *
+ * @param rx_id New RX (receive) data CAN identifier.
+ * @param tx_id New TX (transmit) data CAN identifier.
+ *
+ * @retval 0 on success.
+ * @retval -EINVAL if @p rx_id and @p tx_id are the same identifier, or if one
+ *         of them does not fit the configured identifier format (11 bits, or
+ *         29 bits with CONFIG_MCUMGR_TRANSPORT_ISOTP_EXTENDED_ID).
+ * @retval -ETIMEDOUT if the receive thread did not rebind in time.
+ */
+int smp_isotp_set_peer(uint32_t rx_id, uint32_t tx_id);
+#endif
+
 /**
  * @}
  */

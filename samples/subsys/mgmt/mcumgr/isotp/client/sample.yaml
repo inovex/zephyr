@@ -1,15 +1,18 @@
 sample:
-  name: MCUmgr ISO-TP (CAN) SMP client
+  name: MCUmgr ISO-TP (CAN) SMP client shell
   description: >
-    MCUmgr SMP client that sends OS management "echo" requests over the ISO-TP
-    (CAN, ISO 15765-2) transport to a companion SMP server.
+    Interactive "smpc" shell that drives MCUmgr image, OS and file management
+    over the ISO-TP (CAN, ISO 15765-2) transport to perform firmware updates on
+    remote nodes, with runtime peer retargeting and a littlefs image source.
 common:
   tags:
     - mcumgr
     - smp
     - canbus
     - isotp
-  harness: console
+  # Interactive sample: it needs a CAN bus and a live SMP server/node to do
+  # anything, so it is build-only under twister rather than self-verifying.
+  build_only: true
 tests:
   sample.mgmt.mcumgr.smp.isotp.client:
     platform_allow:

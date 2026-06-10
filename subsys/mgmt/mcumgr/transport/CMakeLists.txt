@@ -34,6 +34,9 @@ zephyr_library_sources_ifdef(CONFIG_MCUMGR_TRANSPORT_LORAWAN
 zephyr_library_sources_ifdef(CONFIG_MCUMGR_TRANSPORT_ISOTP
   src/smp_isotp.c
 )
+zephyr_library_sources_ifdef(CONFIG_MCUMGR_SMP_CLIENT_SHELL_ISOTP
+  src/smp_isotp_shell.c
+)
 zephyr_library_sources_ifdef(CONFIG_MCUMGR_TRANSPORT_DUMMY
   src/smp_dummy.c
 )

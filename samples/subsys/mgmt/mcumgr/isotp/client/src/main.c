@@ -5,64 +5,50 @@
  */
 
 /*
- * MCUmgr SMP client over ISO-TP (CAN).
+ * MCUmgr SMP client over ISO-TP (CAN) - "main controller".
  *
- * This application uses the MCUmgr SMP client together with the OS management
- * client to periodically send an "echo" request to the companion "server"
- * sample over the ISO-TP (CAN) transport, and logs the outcome.
+ * This application turns the device into a main controller that performs
+ * firmware updates on other nodes over the ISO-TP (CAN) transport, driven
+ * interactively from the console with the "smpc" shell commands (see
+ * smp_client_shell.c). Firmware images and files are sourced from the local
+ * littlefs file system mounted at /lfs.
  *
- * The ISO-TP transport itself is brought up automatically by the MCUmgr handler
- * initialisation; because CONFIG_SMP_CLIENT is enabled it registers itself as a
- * client transport of type SMP_ISOTP_TRANSPORT, which is what we look up below.
+ * The ISO-TP transport and the SMP client are brought up by the MCUmgr handler
+ * initialisation and the shell; main() only reports startup status.
  */
 
-#include <string.h>
 #include <zephyr/kernel.h>
+#include <zephyr/fs/fs.h>
 #include <zephyr/logging/log.h>
-#include <zephyr/mgmt/mcumgr/mgmt/mgmt_defines.h>
-#include <zephyr/mgmt/mcumgr/smp/smp_client.h>
-#include <zephyr/mgmt/mcumgr/grp/os_mgmt/os_mgmt_client.h>
-#include <zephyr/mgmt/mcumgr/transport/smp.h>
+#include <zephyr/mgmt/mcumgr/transport/smp_isotp.h>
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
-#define ECHO_STRING   "Hello ISO-TP"
-#define ECHO_INTERVAL K_SECONDS(2)
-
-static struct smp_client_object smp_client;
-static struct os_mgmt_client os_client;
+#define LFS_MOUNT_POINT "/lfs"
 
 int main(void)
 {
+	struct fs_statvfs sbuf;
 	int rc;
-	unsigned int count = 0;
 
-	LOG_INF("MCUmgr ISO-TP (CAN) SMP client started");
-	LOG_INF("Sending to server RX CAN id 0x%x, listening on 0x%x",
+	LOG_INF("MCUmgr ISO-TP (CAN) SMP client (main controller) started");
+	LOG_INF("Default peer: TX 0x%x / RX 0x%x; retarget with 'smpc isotp target <rx> <tx>'",
 		CONFIG_MCUMGR_TRANSPORT_ISOTP_TX_ID, CONFIG_MCUMGR_TRANSPORT_ISOTP_RX_ID);
 
-	/* Discover the ISO-TP transport (registered as SMP_ISOTP_TRANSPORT). */
-	rc = smp_client_object_init(&smp_client, SMP_ISOTP_TRANSPORT);
-	if (rc != MGMT_ERR_EOK) {
-		LOG_ERR("Failed to init SMP client object: %d", rc);
-		return 0;
+	/* The file system is auto-mounted via the devicetree fstab entry; report
+	 * whether it is available so missing storage is obvious at boot.
+	 */
+	rc = fs_statvfs(LFS_MOUNT_POINT, &sbuf);
+	if (rc == 0) {
+		LOG_INF("Image source %s mounted: %lu KiB free", LFS_MOUNT_POINT,
+			(unsigned long)(sbuf.f_bfree * sbuf.f_frsize) / 1024);
+	} else {
+		LOG_WRN("%s not mounted (%d): stage firmware there before uploading",
+			LFS_MOUNT_POINT, rc);
 	}
 
-	os_mgmt_client_init(&os_client, &smp_client);
-
-	while (1) {
-		LOG_INF("[%u] Sending echo: \"%s\"", count, ECHO_STRING);
-
-		rc = os_mgmt_client_echo(&os_client, ECHO_STRING, strlen(ECHO_STRING));
-		if (rc == MGMT_ERR_EOK) {
-			LOG_INF("[%u] Echo round-trip OK", count);
-		} else {
-			LOG_WRN("[%u] Echo failed: %d (is the server running?)", count, rc);
-		}
-
-		++count;
-		k_sleep(ECHO_INTERVAL);
-	}
+	LOG_INF("Ready. Type 'smpc' for SMP client commands, 'fs' to manage %s",
+		LFS_MOUNT_POINT);
 
 	return 0;
 }

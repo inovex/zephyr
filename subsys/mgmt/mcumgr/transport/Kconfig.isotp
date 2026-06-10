@@ -41,11 +41,77 @@ config MCUMGR_TRANSPORT_ISOTP_TX_ID
 	  CAN identifier used for outgoing SMP data frames. Must match the RX data
 	  identifier (MCUMGR_TRANSPORT_ISOTP_RX_ID) configured on the peer.
 
+config MCUMGR_TRANSPORT_ISOTP_SECOND_CHANNEL
+	bool "Second ISO-TP SMP channel (fixed, server-only)"
+	help
+	  Adds a second ISO-TP transport instance on the same CAN bus, with its own
+	  fixed identifiers below, registered as an SMP server only (never as a
+	  client and never retargeted).
+
+	  A single ISO-TP channel is one addressable endpoint, so it cannot be both
+	  a fixed server (reachable at a stable address) and a client that retargets
+	  its identifiers per peer (MCUMGR_TRANSPORT_ISOTP_RUNTIME_PEER). Enable this
+	  on a controller that pushes updates to other nodes over the primary
+	  (client) channel but must itself remain reachable for its own updates over
+	  this fixed (server) channel.
+
+	  The identifiers below must be distinct from each other and from every
+	  identifier used by the primary channel and by any peer on the bus.
+
+if MCUMGR_TRANSPORT_ISOTP_SECOND_CHANNEL
+
+config MCUMGR_TRANSPORT_ISOTP_RX_ID2
+	hex "ISO-TP channel 2 RX data CAN identifier"
+	default 0x90
+	help
+	  CAN identifier the second channel listens on for incoming SMP data frames.
+
+config MCUMGR_TRANSPORT_ISOTP_TX_ID2
+	hex "ISO-TP channel 2 TX data CAN identifier"
+	default 0x190
+	help
+	  CAN identifier used for the second channel's outgoing SMP data frames.
+
+endif # MCUMGR_TRANSPORT_ISOTP_SECOND_CHANNEL
+
 config MCUMGR_TRANSPORT_ISOTP_EXTENDED_ID
 	bool "Use extended (29-bit) CAN identifiers"
 	help
 	  If enabled, the RX and TX identifiers are treated as extended 29-bit CAN
 	  identifiers (IDE). Otherwise standard 11-bit identifiers are used.
+
+config MCUMGR_TRANSPORT_ISOTP_RUNTIME_PEER
+	bool "Allow retargeting the ISO-TP peer (data CAN identifiers) at runtime"
+	default y if SMP_CLIENT
+	help
+	  Exposes smp_isotp_set_peer() so the application can change the data RX/TX
+	  CAN identifiers at runtime, e.g. a main controller addressing several
+	  nodes in turn. The flow control follows the data identifiers.
+
+	  When enabled, the receive thread waits on incoming messages with a bounded
+	  timeout instead of forever, so a retarget request is acted on within
+	  MCUMGR_TRANSPORT_ISOTP_RX_POLL_MS. When disabled, the transport keeps its
+	  compile-time identifiers and the receive thread blocks indefinitely.
+
+config MCUMGR_TRANSPORT_ISOTP_RX_POLL_MS
+	int "ISO-TP receive poll interval (ms) for runtime peer changes"
+	depends on MCUMGR_TRANSPORT_ISOTP_RUNTIME_PEER
+	range 10 5000
+	default 200
+	help
+	  How often the receive thread wakes from an idle wait to check for a
+	  pending peer retarget. Lower values reduce retarget latency at the cost of
+	  more idle wakeups. Has no effect while a message is being received.
+
+config MCUMGR_SMP_CLIENT_SHELL_ISOTP
+	bool "ISO-TP (CAN) backend for the SMP client shell"
+	depends on MCUMGR_SMP_CLIENT_SHELL
+	default y
+	select MCUMGR_TRANSPORT_ISOTP_RUNTIME_PEER
+	help
+	  Binds the MCUmgr SMP client shell (MCUMGR_SMP_CLIENT_SHELL) to the ISO-TP
+	  (CAN) transport and registers the "smpc isotp" subcommands, which retarget
+	  the peer's data CAN identifiers at runtime via smp_isotp_set_peer().
 
 config MCUMGR_TRANSPORT_ISOTP_CAN_FD
 	bool "Use CAN FD frames"

@@ -1,0 +1,29 @@
+common:
+  tags:
+    - mcumgr
+    - can
+    - isotp
+  depends_on: can
+  filter: dt_chosen_enabled("zephyr,canbus") and not dt_compat_enabled("kvaser,pcican")
+  integration_platforms:
+    - native_sim
+tests:
+  mgmt.mcumgr.transport.isotp: {}
+  mgmt.mcumgr.transport.isotp.ext_id:
+    extra_configs:
+      - CONFIG_MCUMGR_TRANSPORT_ISOTP_EXTENDED_ID=y
+  mgmt.mcumgr.transport.isotp.fd:
+    extra_configs:
+      - CONFIG_CAN_FD_MODE=y
+      - CONFIG_MCUMGR_TRANSPORT_ISOTP_CAN_FD=y
+  mgmt.mcumgr.transport.isotp.second_channel:
+    extra_configs:
+      - CONFIG_MCUMGR_TRANSPORT_ISOTP_SECOND_CHANNEL=y
+  mgmt.mcumgr.transport.isotp.runtime_peer:
+    extra_configs:
+      - CONFIG_MCUMGR_TRANSPORT_ISOTP_RUNTIME_PEER=y
+  mgmt.mcumgr.transport.isotp.client:
+    extra_configs:
+      - CONFIG_SMP_CLIENT=y
+      - CONFIG_MCUMGR_GRP_OS_CLIENT=y
+      - CONFIG_MCUMGR_GRP_OS_CLIENT_ECHO=y

@@ -1,0 +1,11 @@
+tests:
+  mgmt.mcumgr.smp_client.shell:
+    platform_allow:
+      - native_sim
+      - native_sim/native/64
+    integration_platforms:
+      - native_sim
+    tags:
+      - mcumgr
+      - smp_client
+      - shell

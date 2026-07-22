@@ -1,0 +1,17 @@
+#
+# Copyright (c) 2026, inovex GmbH
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+
+cmake_minimum_required(VERSION 3.20.0)
+find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
+project(transport_isotp)
+
+FILE(GLOB app_sources src/*.c)
+
+target_sources(app PRIVATE ${app_sources})
+target_include_directories(app PRIVATE
+  ${ZEPHYR_BASE}/subsys/mgmt/mcumgr/transport/include
+  ${ZEPHYR_BASE}/subsys/mgmt/mcumgr/util/include
+)

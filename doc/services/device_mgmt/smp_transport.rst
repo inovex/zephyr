@@ -277,6 +277,9 @@ second, fixed server-only endpoint with its own identifiers
 reachable for its own firmware updates while its primary channel roams between
 peers.
 
+See the :zephyr:code-sample:`mcumgr-isotp-server` and
+:zephyr:code-sample:`mcumgr-isotp-client` samples for a working setup.
+
 API Reference
 *************
 

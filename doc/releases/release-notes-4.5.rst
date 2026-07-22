@@ -105,6 +105,9 @@ New Samples
   Same as above, this will also be recomputed at the time of the release.
  Just link the sample, further details go in the sample documentation itself.
 
+* :zephyr:code-sample:`mcumgr-isotp-client`
+* :zephyr:code-sample:`mcumgr-isotp-server`
+
 Libraries / Subsystems
 **********************
 

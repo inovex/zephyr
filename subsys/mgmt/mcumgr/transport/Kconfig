@@ -32,6 +32,7 @@ config MCUMGR_TRANSPORT_REASSEMBLY
 config MCUMGR_TRANSPORT_NETBUF_COUNT
 	int "Number of MCUmgr buffers"
 	default 2 if MCUMGR_TRANSPORT_UDP
+	default 3 if MCUMGR_TRANSPORT_ISOTP
 	default 4
 	help
 	  The number of net_bufs to allocate for MCUmgr. These buffers are used for both requests
@@ -40,6 +41,7 @@ config MCUMGR_TRANSPORT_NETBUF_COUNT
 config MCUMGR_TRANSPORT_NETBUF_SIZE
 	int "Size of each MCUmgr buffer"
 	default 2048 if MCUMGR_TRANSPORT_UDP
+	default 1024 if MCUMGR_TRANSPORT_ISOTP
 	default 384
 	help
 	  The size, in bytes, of each MCUmgr buffer. This value must satisfy the following
@@ -78,6 +80,8 @@ rsource "Kconfig.dummy"
 rsource "Kconfig.bluetooth"
 
 rsource "Kconfig.lorawan"
+
+rsource "Kconfig.isotp"
 
 rsource "Kconfig.raw_dummy"
 

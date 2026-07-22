@@ -63,6 +63,13 @@ New APIs and options
 
 .. zephyr-keep-sorted-start re(^\* \w)
 
+* MCUmgr
+
+  * :kconfig:option:`CONFIG_MCUMGR_TRANSPORT_ISOTP`, an SMP transport over ISO-TP
+    (ISO 15765-2) on CAN, with optional runtime peer retargeting
+    (:c:func:`smp_isotp_set_peer`) and a second fixed server channel. See
+    :ref:`mcumgr_smp_transport_isotp`.
+
 .. zephyr-keep-sorted-stop
 
 New Boards

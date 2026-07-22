@@ -147,6 +147,16 @@ config MCUMGR_TRANSPORT_ISOTP_RX_POLL_MS
 	  pending peer retarget. Lower values reduce retarget latency at the cost of
 	  more idle wakeups. Has no effect while a message is being received.
 
+config MCUMGR_SMP_CLIENT_SHELL_ISOTP
+	bool "ISO-TP (CAN) backend for the SMP client shell"
+	depends on MCUMGR_SMP_CLIENT_SHELL
+	default y
+	select MCUMGR_TRANSPORT_ISOTP_RUNTIME_PEER
+	help
+	  Binds the MCUmgr SMP client shell (MCUMGR_SMP_CLIENT_SHELL) to the ISO-TP
+	  (CAN) transport and registers the "smpc isotp" subcommands, which retarget
+	  the peer's data CAN identifiers at runtime via smp_isotp_set_peer().
+
 config MCUMGR_TRANSPORT_ISOTP_CAN_FD
 	bool "Use CAN FD frames"
 	depends on CAN_FD_MODE

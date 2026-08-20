@@ -1,0 +1,232 @@
+#
+# Copyright (c) 2026, inovex GmbH
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+
+# The Kconfig file is dedicated to the ISO-TP (CAN) transport of MCUmgr
+# subsystem and provides Kconfig options to control aspects of
+# the transport.
+#
+# Options defined in this file should be prefixed:
+#  MCUMGR_TRANSPORT_ISOTP_
+
+menuconfig MCUMGR_TRANSPORT_ISOTP
+	bool "ISO-TP (CAN) MCUmgr SMP transport [EXPERIMENTAL]"
+	depends on ISOTP
+	select EXPERIMENTAL
+	help
+	  Enables handling of SMP commands received over ISO-TP (ISO 15765-2) on a
+	  CAN bus. ISO-TP performs its own segmentation and reassembly, so a single
+	  ISO-TP message carries one complete SMP packet; the MCUmgr reassembly
+	  layer is not used.
+
+	  The CAN controller used is the one selected by the "zephyr,canbus"
+	  devicetree chosen node.
+
+if MCUMGR_TRANSPORT_ISOTP
+
+config MCUMGR_TRANSPORT_ISOTP_RX_ID
+	hex "ISO-TP RX data CAN identifier"
+	default 0x80
+	help
+	  CAN identifier the transport listens on for incoming SMP data frames.
+	  Must match the TX data identifier (MCUMGR_TRANSPORT_ISOTP_TX_ID)
+	  configured on the peer.
+
+config MCUMGR_TRANSPORT_ISOTP_TX_ID
+	hex "ISO-TP TX data CAN identifier"
+	default 0x180
+	help
+	  CAN identifier used for outgoing SMP data frames. Must match the RX data
+	  identifier (MCUMGR_TRANSPORT_ISOTP_RX_ID) configured on the peer.
+
+config MCUMGR_TRANSPORT_ISOTP_TX_FC_ID
+	hex "ISO-TP TX flow-control CAN identifier"
+	default 0x480
+	help
+	  CAN identifier used for flow-control frames this node sends while it is
+	  receiving an SMP message (i.e. flow control for the peer's transmissions).
+
+	  ISO-TP flow control must use a CAN identifier distinct from the data
+	  identifiers. Zephyr's ISO-TP API uses separate receive and send contexts;
+	  if the flow-control identifier overlapped a data identifier, both contexts
+	  would install a filter on the same CAN ID and every frame would be
+	  delivered to both, aborting transfers with ISOTP_N_UNEXP_PDU. A dedicated
+	  flow-control identifier per direction keeps the two contexts decoupled.
+
+	  Must match the RX flow-control identifier
+	  (MCUMGR_TRANSPORT_ISOTP_RX_FC_ID) configured on the peer.
+
+config MCUMGR_TRANSPORT_ISOTP_RX_FC_ID
+	hex "ISO-TP RX flow-control CAN identifier"
+	default 0x580
+	help
+	  CAN identifier this node expects incoming flow-control frames on while it
+	  is transmitting an SMP message (i.e. flow control for its own
+	  transmissions).
+
+	  Must match the TX flow-control identifier
+	  (MCUMGR_TRANSPORT_ISOTP_TX_FC_ID) configured on the peer, and must be
+	  distinct from the data identifiers. See MCUMGR_TRANSPORT_ISOTP_TX_FC_ID.
+
+config MCUMGR_TRANSPORT_ISOTP_SECOND_CHANNEL
+	bool "Second ISO-TP SMP channel (fixed, server-only)"
+	help
+	  Adds a second ISO-TP transport instance on the same CAN bus, with its own
+	  fixed data and flow-control identifiers below, registered as an SMP server
+	  only (never as a client and never retargeted).
+
+	  A single ISO-TP channel is one addressable endpoint, so it cannot be both
+	  a fixed server (reachable at a stable address) and a client that retargets
+	  its identifiers per peer (MCUMGR_TRANSPORT_ISOTP_RUNTIME_PEER). Enable this
+	  on a controller that pushes updates to other nodes over the primary
+	  (client) channel but must itself remain reachable for its own updates over
+	  this fixed (server) channel.
+
+	  All four identifiers below must be distinct from each other and from every
+	  identifier used by the primary channel and by any peer on the bus.
+
+if MCUMGR_TRANSPORT_ISOTP_SECOND_CHANNEL
+
+config MCUMGR_TRANSPORT_ISOTP_RX_ID2
+	hex "ISO-TP channel 2 RX data CAN identifier"
+	default 0x90
+	help
+	  CAN identifier the second channel listens on for incoming SMP data frames.
+
+config MCUMGR_TRANSPORT_ISOTP_TX_ID2
+	hex "ISO-TP channel 2 TX data CAN identifier"
+	default 0x190
+	help
+	  CAN identifier used for the second channel's outgoing SMP data frames.
+
+config MCUMGR_TRANSPORT_ISOTP_TX_FC_ID2
+	hex "ISO-TP channel 2 TX flow-control CAN identifier"
+	default 0x490
+	help
+	  Flow-control identifier the second channel sends on while receiving. Must
+	  be distinct from the data identifiers (see MCUMGR_TRANSPORT_ISOTP_TX_FC_ID).
+
+config MCUMGR_TRANSPORT_ISOTP_RX_FC_ID2
+	hex "ISO-TP channel 2 RX flow-control CAN identifier"
+	default 0x590
+	help
+	  Flow-control identifier the second channel expects while sending. Must be
+	  distinct from the data identifiers (see MCUMGR_TRANSPORT_ISOTP_TX_FC_ID).
+
+endif # MCUMGR_TRANSPORT_ISOTP_SECOND_CHANNEL
+
+config MCUMGR_TRANSPORT_ISOTP_EXTENDED_ID
+	bool "Use extended (29-bit) CAN identifiers"
+	help
+	  If enabled, the RX and TX identifiers are treated as extended 29-bit CAN
+	  identifiers (IDE). Otherwise standard 11-bit identifiers are used.
+
+config MCUMGR_TRANSPORT_ISOTP_RUNTIME_PEER
+	bool "Allow retargeting the ISO-TP peer (data CAN identifiers) at runtime"
+	default y if SMP_CLIENT
+	help
+	  Exposes smp_isotp_set_peer() so the application can change the data RX/TX
+	  CAN identifiers at runtime, e.g. a main controller addressing several
+	  nodes in turn. The flow-control identifiers are left unchanged (they can
+	  be shared across nodes as long as only one peer is addressed at a time).
+
+	  When enabled, the receive thread waits on incoming messages with a bounded
+	  timeout instead of forever, so a retarget request is acted on within
+	  MCUMGR_TRANSPORT_ISOTP_RX_POLL_MS. When disabled, the transport keeps its
+	  compile-time identifiers and the receive thread blocks indefinitely.
+
+config MCUMGR_TRANSPORT_ISOTP_RX_POLL_MS
+	int "ISO-TP receive poll interval (ms) for runtime peer changes"
+	depends on MCUMGR_TRANSPORT_ISOTP_RUNTIME_PEER
+	range 10 5000
+	default 200
+	help
+	  How often the receive thread wakes from an idle wait to check for a
+	  pending peer retarget. Lower values reduce retarget latency at the cost of
+	  more idle wakeups. Has no effect while a message is being received.
+
+config MCUMGR_SMP_CLIENT_SHELL_ISOTP
+	bool "ISO-TP (CAN) backend for the SMP client shell"
+	depends on MCUMGR_SMP_CLIENT_SHELL
+	default y
+	select MCUMGR_TRANSPORT_ISOTP_RUNTIME_PEER
+	help
+	  Binds the MCUmgr SMP client shell (MCUMGR_SMP_CLIENT_SHELL) to the ISO-TP
+	  (CAN) transport and registers the "smpc isotp" subcommands, which retarget
+	  the peer's data CAN identifiers at runtime via smp_isotp_set_peer().
+
+config MCUMGR_TRANSPORT_ISOTP_CAN_FD
+	bool "Use CAN FD frames"
+	depends on CAN_FD_MODE
+	help
+	  If enabled, ISO-TP uses CAN FD frames (larger payload per frame). The CAN
+	  controller is configured into CAN FD mode when MCUMGR_TRANSPORT_ISOTP_AUTO_START
+	  is set. Otherwise classic CAN frames (8 bytes) are used.
+
+	  Make sure ISOTP_RX_BUF_SIZE is at least the CAN FD frame payload size
+	  used by the peer (typically 64); with the small classic-CAN default, a
+	  single FD frame can never be buffered and reception stalls.
+
+config MCUMGR_TRANSPORT_ISOTP_TX_DL
+	int "CAN FD transmit data length"
+	depends on MCUMGR_TRANSPORT_ISOTP_CAN_FD
+	default 64
+	help
+	  ISO-TP transmit frame data length (TX_DL) for CAN FD. Valid values are
+	  8, 12, 16, 20, 24, 32, 48 and 64.
+
+config MCUMGR_TRANSPORT_ISOTP_FC_BS
+	int "ISO-TP flow-control block size (BS)"
+	range 0 255
+	default 8
+	help
+	  Number of consecutive frames the peer may send before waiting for the
+	  next flow-control frame. 0 means the whole message is sent without
+	  intermediate flow control.
+
+config MCUMGR_TRANSPORT_ISOTP_FC_STMIN
+	int "ISO-TP flow-control minimum separation time (STmin)"
+	range 0 255
+	default 0
+	help
+	  Minimum separation time between consecutive frames requested from the
+	  peer. Values 0-127 are milliseconds; 241-249 encode 100us-900us. See
+	  ISO 15765-2.
+
+config MCUMGR_TRANSPORT_ISOTP_TX_TIMEOUT_MS
+	int "ISO-TP transmit timeout (ms)"
+	range 1 60000
+	default 5000
+	help
+	  Maximum time to wait for an ISO-TP transmission to complete before the
+	  output function gives up and frees the buffer.
+
+config MCUMGR_TRANSPORT_ISOTP_AUTO_START
+	bool "Configure and start the CAN controller"
+	default y
+	help
+	  If enabled, the transport configures the CAN controller mode (including
+	  CAN FD if selected) and starts it during initialisation. Disable this if
+	  the application shares the CAN bus with other users and brings the
+	  controller up itself.
+
+config MCUMGR_TRANSPORT_ISOTP_THREAD_STACK_SIZE
+	int "ISO-TP receive thread stack size"
+	default 1024
+	help
+	  Stack size of the thread that blocks on incoming ISO-TP messages and
+	  forwards reassembled SMP packets for processing.
+
+config MCUMGR_TRANSPORT_ISOTP_THREAD_PRIORITY
+	int "ISO-TP receive thread priority"
+	default 3
+	help
+	  Priority of the ISO-TP receive thread.
+
+module = MCUMGR_TRANSPORT_ISOTP
+module-str = ISO-TP (CAN) MCUmgr SMP transport
+source "subsys/logging/Kconfig.template.log_config"
+
+endif # MCUMGR_TRANSPORT_ISOTP

@@ -63,6 +63,16 @@ New APIs and options
 
 .. zephyr-keep-sorted-start re(^\* \w)
 
+* MCUmgr
+
+  * :kconfig:option:`CONFIG_MCUMGR_TRANSPORT_ISOTP`, an SMP transport over ISO-TP
+    (ISO 15765-2) on CAN, with optional runtime peer retargeting
+    (:c:func:`smp_isotp_set_peer`) and a second fixed server channel. See
+    :ref:`mcumgr_smp_transport_isotp`.
+  * :kconfig:option:`CONFIG_MCUMGR_SMP_CLIENT_SHELL`, an interactive ``smpc`` shell driving
+    the SMP client (echo, reset, image and file management) over a runtime-selectable
+    SMP transport.
+
 .. zephyr-keep-sorted-stop
 
 New Boards
@@ -94,6 +104,9 @@ New Samples
 ..
   Same as above, this will also be recomputed at the time of the release.
  Just link the sample, further details go in the sample documentation itself.
+
+* :zephyr:code-sample:`mcumgr-isotp-client`
+* :zephyr:code-sample:`mcumgr-isotp-server`
 
 Libraries / Subsystems
 **********************

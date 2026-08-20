@@ -220,7 +220,69 @@ UART and the data can be verified before being passed, this option is not needed
 be enabled with :kconfig:option:`CONFIG_MCUMGR_TRANSPORT_RAW_UART_INPUT_TIMEOUT`, the timeout for
 this can be set with :kconfig:option:`CONFIG_MCUMGR_TRANSPORT_RAW_UART_INPUT_TIMEOUT_TIME_MS`.
 
+.. _mcumgr_smp_transport_isotp:
+
+ISO-TP (CAN)
+************
+
+The ISO-TP transport (:kconfig:option:`CONFIG_MCUMGR_TRANSPORT_ISOTP`) carries
+SMP over ISO 15765-2 on a CAN bus. ISO-TP performs its own segmentation,
+reassembly and flow control, so each ISO-TP message carries exactly one
+complete SMP packet, without any additional framing. The MCUmgr reassembly
+layer is not used and an SMP packet is limited to the 4095-byte maximum length
+of a single ISO-TP message (or the configured MCUmgr buffer size, if smaller).
+
+Addressing
+==========
+
+An SMP endpoint uses four CAN identifiers, configured with Kconfig options:
+
+.. table::
+    :align: center
+
+    +----------------------------------------------------------+----------------------------------------+
+    | Option                                                    | Used for                               |
+    +===========================================================+========================================+
+    | :kconfig:option:`CONFIG_MCUMGR_TRANSPORT_ISOTP_RX_ID`     | Incoming SMP data                      |
+    +----------------------------------------------------------+----------------------------------------+
+    | :kconfig:option:`CONFIG_MCUMGR_TRANSPORT_ISOTP_TX_ID`     | Outgoing SMP data                      |
+    +----------------------------------------------------------+----------------------------------------+
+    | :kconfig:option:`CONFIG_MCUMGR_TRANSPORT_ISOTP_TX_FC_ID`  | Flow control sent while receiving      |
+    +----------------------------------------------------------+----------------------------------------+
+    | :kconfig:option:`CONFIG_MCUMGR_TRANSPORT_ISOTP_RX_FC_ID`  | Flow control expected while sending    |
+    +----------------------------------------------------------+----------------------------------------+
+
+Unlike normal ISO-TP addressing, the flow-control frames use their own
+identifier pair, distinct from the data identifiers: Zephyr's ISO-TP
+implementation installs an exact CAN filter per context, and a flow-control
+frame sharing a data identifier would be delivered to both the receive and the
+send context, aborting transfers. Both peers must use the same four-identifier
+scheme, mirrored: one node's TX data identifier is the other's RX data
+identifier, and likewise for the flow-control pair.
+
+Standard 11-bit identifiers are used by default; extended 29-bit identifiers
+can be selected with :kconfig:option:`CONFIG_MCUMGR_TRANSPORT_ISOTP_EXTENDED_ID`
+and CAN FD frames with :kconfig:option:`CONFIG_MCUMGR_TRANSPORT_ISOTP_CAN_FD`.
+
+Multiple peers
+==============
+
+For a controller that manages several nodes on one bus, the data identifiers of
+the primary channel can be changed at runtime with :c:func:`smp_isotp_set_peer`
+(:kconfig:option:`CONFIG_MCUMGR_TRANSPORT_ISOTP_RUNTIME_PEER`); the
+flow-control identifiers stay fixed and may be shared across nodes as long as
+only one peer is addressed at a time. Such a node can additionally expose a
+second, fixed server-only endpoint with its own identifiers
+(:kconfig:option:`CONFIG_MCUMGR_TRANSPORT_ISOTP_SECOND_CHANNEL`), so it remains
+reachable for its own firmware updates while its primary channel roams between
+peers.
+
+See the :zephyr:code-sample:`mcumgr-isotp-server` and
+:zephyr:code-sample:`mcumgr-isotp-client` samples for a working setup.
+
 API Reference
 *************
 
 .. doxygengroup:: mcumgr_transport_smp
+
+.. doxygengroup:: mcumgr_transport_isotp

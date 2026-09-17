@@ -54,6 +54,10 @@ static const struct socket_op_vtable websocket_fd_op_vtable;
 int verify_sent_and_received_msg(struct net_msghdr *msg, bool split_msg);
 #endif
 
+#if defined(CONFIG_WEBSOCKET_DEDICATED_HEAP)
+K_HEAP_DEFINE(websocket_heap, CONFIG_WEBSOCKET_DEDICATED_HEAP_SIZE);
+#endif
+
 static const char *opcode2str(enum websocket_opcode opcode)
 {
 	switch (opcode) {
@@ -741,7 +745,11 @@ int websocket_send_msg(int ws_sock, const uint8_t *payload, size_t payload_len,
 		header[hdr_len++] |= ctx->masking_value;
 
 		if ((payload != NULL) && (payload_len > 0)) {
+#ifdef CONFIG_WEBSOCKET_DEDICATED_HEAP
+			data_to_send = k_heap_alloc(&websocket_heap, payload_len, K_NO_WAIT);
+#else
 			data_to_send = k_malloc(payload_len);
+#endif
 			if (!data_to_send) {
 				return -ENOMEM;
 			}
@@ -763,7 +771,11 @@ int websocket_send_msg(int ws_sock, const uint8_t *payload, size_t payload_len,
 
 quit:
 	if (data_to_send != payload) {
+#ifdef CONFIG_WEBSOCKET_DEDICATED_HEAP
+		k_heap_free(&websocket_heap, data_to_send);
+#else
 		k_free(data_to_send);
+#endif
 	}
 
 	/* Do no math with 0 and error codes */

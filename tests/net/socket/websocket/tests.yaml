@@ -6,3 +6,10 @@ tests:
     tags:
       - net
       - websocket
+  net.socket.websocket.dedicated_heap:
+    min_ram: 21
+    tags:
+      - net
+      - websocket
+    extra_configs:
+      - CONFIG_WEBSOCKET_DEDICATED_HEAP=y

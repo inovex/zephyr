@@ -31,7 +31,8 @@ NET_BUF_POOL_DEFINE(isotp_rx_sf_ff_pool, CONFIG_ISOTP_RX_SF_FF_BUF_COUNT,
 
 static struct isotp_global_ctx global_ctx = {
 	.alloc_list = SYS_SLIST_STATIC_INIT(&global_ctx.alloc_list),
-	.ff_sf_alloc_list = SYS_SLIST_STATIC_INIT(&global_ctx.ff_sf_alloc_list)
+	.ff_sf_alloc_list = SYS_SLIST_STATIC_INIT(&global_ctx.ff_sf_alloc_list),
+	.bound_list = SYS_SLIST_STATIC_INIT(&global_ctx.bound_list),
 };
 
 #ifdef CONFIG_ISOTP_USE_TX_BUF
@@ -55,6 +56,38 @@ static inline void prepare_filter(struct can_filter *filter, struct isotp_msg_id
 	filter->id = addr->ext_id;
 	filter->mask = mask;
 	filter->flags = (addr->flags & ISOTP_MSG_IDE) != 0 ? CAN_FILTER_IDE : 0;
+}
+
+static void send_can_rx_cb(const struct device *dev, struct can_frame *frame, void *arg);
+static inline int add_fc_filter(struct isotp_send_ctx *sctx);
+static void send_detach_fc(struct isotp_send_ctx *sctx);
+
+/* True if the frame is a flow-control N_PDU on the given address. */
+static inline bool frame_is_fc(const struct isotp_msg_id *addr, const struct can_frame *frame)
+{
+	int index = (addr->flags & ISOTP_MSG_EXT_ADDR) != 0 ? 1 : 0;
+
+	if (can_dlc_to_bytes(frame->dlc) <= index) {
+		return false;
+	}
+
+	return (frame->data[index] & ISOTP_PCI_TYPE_MASK) == ISOTP_PCI_TYPE_FC;
+}
+
+/* True if two addresses select the same CAN frames (no fixed addressing). */
+static inline bool addr_match(const struct isotp_msg_id *a, const struct isotp_msg_id *b)
+{
+	const uint8_t flags = ISOTP_MSG_IDE | ISOTP_MSG_EXT_ADDR | ISOTP_MSG_FIXED_ADDR;
+
+	if (a->ext_id != b->ext_id || (a->flags & flags) != (b->flags & flags)) {
+		return false;
+	}
+
+	if ((a->flags & ISOTP_MSG_FIXED_ADDR) != 0) {
+		return false;
+	}
+
+	return (a->flags & ISOTP_MSG_EXT_ADDR) == 0 || a->ext_addr == b->ext_addr;
 }
 
 /*
@@ -574,6 +607,28 @@ static void receive_can_rx(const struct device *dev, struct can_frame *frame, vo
 		return;
 	}
 
+	if (frame_is_fc(&rctx->rx_addr, frame)) {
+		/* With normal addressing (ISO 15765-2) the peer paces our transmission
+		 * on the address that we receive its data on. The flow control belongs
+		 * to the send context that waits on this address. A receive context
+		 * ignores flow control (ISO 15765-2, unexpected arrival of N_PDU).
+		 */
+		struct isotp_send_ctx *sctx;
+		k_spinlock_key_t key = k_spin_lock(&global_ctx.lock);
+
+		sctx = rctx->fc_sctx;
+		k_spin_unlock(&global_ctx.lock, key);
+
+		if (sctx != NULL) {
+			send_can_rx_cb(dev, frame, sctx);
+		} else {
+			LOG_DBG("Ignoring FC frame on 0x%x, no transmission in progress",
+				rctx->rx_addr.ext_id);
+		}
+
+		return;
+	}
+
 	switch (rctx->state) {
 	case ISOTP_RX_STATE_WAIT_FF_SF:
 		__ASSERT_NO_MSG(rctx->buf);
@@ -631,6 +686,7 @@ int isotp_bind(struct isotp_recv_ctx *rctx, const struct device *can_dev,
 	       const struct isotp_fc_opts *opts,
 	       k_timeout_t timeout)
 {
+	k_spinlock_key_t key;
 	can_mode_t cap;
 	int ret;
 
@@ -678,12 +734,35 @@ int isotp_bind(struct isotp_recv_ctx *rctx, const struct device *can_dev,
 	k_work_init(&rctx->work, receive_work_handler);
 	k_timer_init(&rctx->timer, receive_timeout_handler, NULL);
 
+	key = k_spin_lock(&global_ctx.lock);
+	rctx->fc_sctx = NULL;
+	sys_slist_append(&global_ctx.bound_list, &rctx->bound_node);
+	k_spin_unlock(&global_ctx.lock, key);
+
 	return ISOTP_N_OK;
 }
 
 void isotp_unbind(struct isotp_recv_ctx *rctx)
 {
 	struct net_buf *buf;
+	struct isotp_send_ctx *sctx;
+	k_spinlock_key_t key;
+
+	key = k_spin_lock(&global_ctx.lock);
+	sys_slist_find_and_remove(&global_ctx.bound_list, &rctx->bound_node);
+	sctx = rctx->fc_sctx;
+	rctx->fc_sctx = NULL;
+	if (sctx != NULL) {
+		sctx->fc_rctx = NULL;
+	}
+	k_spin_unlock(&global_ctx.lock, key);
+
+	if (sctx != NULL) {
+		/* A transmission still waits for flow control on this address. */
+		if (add_fc_filter(sctx) != 0) {
+			LOG_ERR("Unbound while sending and no filter left for FC");
+		}
+	}
 
 	if (rctx->filter_id >= 0 && rctx->can_dev) {
 		can_remove_rx_filter(rctx->can_dev, rctx->filter_id);
@@ -872,14 +951,24 @@ static void send_can_rx_cb(const struct device *dev, struct can_frame *frame, vo
 		return;
 	}
 
-	if (sctx->state == ISOTP_TX_WAIT_FC) {
-		k_timer_stop(&sctx->timer);
-		send_process_fc(sctx, frame);
-	} else {
-		LOG_ERR("Got unexpected PDU");
-		send_report_error(sctx, ISOTP_N_UNEXP_PDU);
+	/* ISO 15765-2, unexpected arrival of N_PDU: a sender ignores every N_PDU
+	 * that is not flow control, and ignores flow control that it does not wait
+	 * for. With normal addressing the peer sends its data on the address that
+	 * carries its flow control, so these frames arrive here when both peers
+	 * transmit at the same time.
+	 */
+	if (!frame_is_fc(&sctx->rx_addr, frame)) {
+		LOG_DBG("Ignoring non-FC frame on 0x%x while sending", sctx->rx_addr.ext_id);
+		return;
 	}
 
+	if (sctx->state != ISOTP_TX_WAIT_FC) {
+		LOG_DBG("Ignoring FC frame in TX state %d", sctx->state);
+		return;
+	}
+
+	k_timer_stop(&sctx->timer);
+	send_process_fc(sctx, frame);
 	k_work_submit(&sctx->work);
 }
 
@@ -1144,9 +1233,7 @@ static void send_state_machine(struct isotp_send_ctx *sctx)
 	case ISOTP_TX_SEND_SF:
 		__fallthrough;
 	case ISOTP_TX_WAIT_FIN:
-		if (sctx->filter_id >= 0) {
-			can_remove_rx_filter(sctx->can_dev, sctx->filter_id);
-		}
+		send_detach_fc(sctx);
 
 		LOG_DBG("SM finish");
 		k_timer_stop(&sctx->timer);
@@ -1194,6 +1281,59 @@ static inline int add_fc_filter(struct isotp_send_ctx *sctx)
 	}
 
 	return 0;
+}
+
+/* Arrange for the flow-control frames of this transmission to reach sctx.
+ *
+ * If a receive context is bound to the address on which the flow control
+ * arrives, the flow control is forwarded by that context. No second filter is
+ * installed for the same identifier: CAN controllers with hardware acceptance
+ * filtering (for example M_CAN, bxCAN) report only the first matching filter
+ * element, so a second filter would never see the frames. Without a bound
+ * receive context a dedicated filter is installed.
+ */
+static int send_attach_fc(struct isotp_send_ctx *sctx)
+{
+	struct isotp_recv_ctx *rctx;
+	k_spinlock_key_t key;
+
+	sctx->fc_rctx = NULL;
+	sctx->filter_id = -1;
+
+	key = k_spin_lock(&global_ctx.lock);
+	SYS_SLIST_FOR_EACH_CONTAINER(&global_ctx.bound_list, rctx, bound_node) {
+		if (rctx->fc_sctx == NULL && rctx->can_dev == sctx->can_dev &&
+		    addr_match(&rctx->rx_addr, &sctx->rx_addr)) {
+			rctx->fc_sctx = sctx;
+			sctx->fc_rctx = rctx;
+			break;
+		}
+	}
+	k_spin_unlock(&global_ctx.lock, key);
+
+	if (sctx->fc_rctx != NULL) {
+		LOG_DBG("FC on 0x%x arrives through the bound receive context",
+			sctx->rx_addr.ext_id);
+		return 0;
+	}
+
+	return add_fc_filter(sctx);
+}
+
+static void send_detach_fc(struct isotp_send_ctx *sctx)
+{
+	k_spinlock_key_t key = k_spin_lock(&global_ctx.lock);
+
+	if (sctx->fc_rctx != NULL) {
+		sctx->fc_rctx->fc_sctx = NULL;
+		sctx->fc_rctx = NULL;
+	}
+	k_spin_unlock(&global_ctx.lock, key);
+
+	if (sctx->filter_id >= 0) {
+		can_remove_rx_filter(sctx->can_dev, sctx->filter_id);
+		sctx->filter_id = -1;
+	}
 }
 
 static int send(struct isotp_send_ctx *sctx, const struct device *can_dev,
@@ -1268,7 +1408,7 @@ static int send(struct isotp_send_ctx *sctx, const struct device *can_dev,
 	/* Single frames > 8 bytes use an additional byte for length (CAN FD only) */
 	if (len > sctx->tx_addr.dl - (((tx_addr->flags & ISOTP_MSG_EXT_ADDR) != 0) ? 2 : 1) -
 			  ((sctx->tx_addr.dl > ISOTP_4BIT_SF_MAX_CAN_DL) ? 1 : 0)) {
-		ret = add_fc_filter(sctx);
+		ret = send_attach_fc(sctx);
 		if (ret) {
 			LOG_ERR("Can't add fc filter: %d", ret);
 			free_send_ctx(&sctx);
@@ -1281,6 +1421,7 @@ static int send(struct isotp_send_ctx *sctx, const struct device *can_dev,
 	} else {
 		LOG_DBG("Sending single frame");
 		sctx->filter_id = -1;
+		sctx->fc_rctx = NULL;
 		ret = send_sf(sctx);
 		if (ret) {
 			free_send_ctx(&sctx);

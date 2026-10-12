@@ -419,8 +419,12 @@ struct isotp_callback {
 	void *arg;
 };
 
+struct isotp_recv_ctx;
+
 struct isotp_send_ctx {
 	int filter_id;
+	/* Bound receive context that forwards flow control, or NULL */
+	struct isotp_recv_ctx *fc_rctx;
 	uint32_t error_nr;
 	const struct device *can_dev;
 	union {
@@ -452,6 +456,9 @@ struct isotp_send_ctx {
 
 struct isotp_recv_ctx {
 	int filter_id;
+	sys_snode_t bound_node;
+	/* Send context that waits for flow control on rx_addr, or NULL */
+	struct isotp_send_ctx *fc_sctx;
 	const struct device *can_dev;
 	struct net_buf *buf;
 	struct net_buf *act_frag;

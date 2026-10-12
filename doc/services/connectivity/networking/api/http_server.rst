@@ -478,6 +478,19 @@ processing of the Websocket connection is application-specific, hence outside
 of scope of this guide. See :zephyr:code-sample:`sockets-http-server` for an
 example Websocket-based echo service implementation.
 
+Disabling resources
+===================
+
+All resources have a ``disabled`` flag in the common section. The flag is set to
+``false`` by default, so all resources are enabled by default. When the flag is
+set to ``true``, the resource is no longer visible to the path lookup
+functions. Depending on the other configuration of the http service, the client
+will receive either a 404 response, or a response from a different resource if
+:kconfig:option:`CONFIG_HTTP_SERVER_RESOURCE_WILDCARD` is enabled or a fallback
+resource is registered.
+
+For the fallback resource itself, the ``disabled`` flag is ignored.
+
 .. _http_server_interface_accessing_request_headers:
 
 Accessing request headers

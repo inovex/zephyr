@@ -80,7 +80,7 @@ static int cmd_net_http(const struct shell *sh, size_t argc, char *argv[])
 
 	PR("%-15s\t%-19s\t%s\n",
 	   "Host:Port", "Concurrent/Backlog", "Protocols");
-	PR("\tResource type\tMethods\t\tEndpoint\n");
+	PR("\tResource type\tMethods\t\tEnabled\tEndpoint\n");
 
 	HTTP_SERVICE_FOREACH(svc) {
 		char backlog_buf[sizeof("xxxxx/xxxxx")];
@@ -133,7 +133,7 @@ static int cmd_net_http(const struct shell *sh, size_t argc, char *argv[])
 				PR("\t");
 			}
 
-			PR("\t%s\n", res->resource);
+			PR("\t%s\t%s\n", detail->disabled ? "no" : "yes", res->resource);
 			res_count++;
 		}
 

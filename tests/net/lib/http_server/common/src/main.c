@@ -421,6 +421,32 @@ ZTEST(http_service, test_HTTP_RESOURCE_DEFAULT)
 	zassert_equal(res, RES(0), "Resource mismatch");
 }
 
+ZTEST(http_service, test_HTTP_RESOURCE_DISABLED)
+{
+	struct http_resource_detail *res;
+	int len;
+
+	/* When a resource is disabled, it should not be found by path lookup */
+	(RES(1))->disabled = true;
+	res = CHECK_PATH(service_A, "/index.html", &len);
+	zassert_is_null(res, "Disabled resource still found");
+
+	/* When a resource is enabled, it should be found by path lookup */
+	(RES(1))->disabled = false;
+	res = CHECK_PATH(service_A, "/index.html", &len);
+	zassert_not_null(res, "Re-enabled resource still not found");
+	zassert_equal(res, RES(1), "Resource mismatch");
+
+	/* When a resource is disabled and a fallback resource exists, the fallback resource should
+	 * be returned.
+	 */
+	(RES(4))->disabled = true;
+	res = CHECK_PATH(service_E, "/index.html", &len);
+	zassert_not_null(res, "Cannot find resource");
+	zassert_equal(res, RES(0), "Resource mismatch");
+	(RES(4))->disabled = false;
+}
+
 extern void http_server_get_content_type_from_extension(char *url, char *content_type,
 							size_t content_type_size);
 

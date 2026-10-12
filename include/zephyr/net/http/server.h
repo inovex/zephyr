@@ -100,6 +100,9 @@ struct http_resource_detail {
 
 	/** Content type of the resource. */
 	const char *content_type;
+
+	/** Flag if the resource is disabled. */
+	bool disabled;
 };
 
 /** @cond INTERNAL_HIDDEN */

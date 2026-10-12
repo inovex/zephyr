@@ -1625,6 +1625,10 @@ static bool skip_this(struct http_resource_desc *resource, bool is_websocket)
 
 	detail = (struct http_resource_detail *)resource->detail;
 
+	if (detail->disabled) {
+		return true;
+	}
+
 	if (is_websocket) {
 		if (detail->type != HTTP_RESOURCE_TYPE_WEBSOCKET) {
 			return true;

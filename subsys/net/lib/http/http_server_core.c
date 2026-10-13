@@ -71,6 +71,14 @@ static struct http_server_ctx server_ctx;
 static K_SEM_DEFINE(server_start, 0, 1);
 static bool server_running;
 
+#define HTTP_SERVER_CMD_STOP 1
+
+struct http_server_cmd {
+	int command;
+};
+
+K_MSGQ_DEFINE_STATIC(server_msgq, sizeof(struct http_server_cmd), 4, 1);
+
 #if defined(CONFIG_HTTP_SERVER_TLS_USE_ALPN)
 #if defined(CONFIG_HTTP_SERVER_VERSION_1) || defined(CONFIG_HTTP_SERVER_VERSION_2)
 static const char *const h1_h2_alpn_list[] = {
@@ -328,6 +336,9 @@ int http_server_init(struct http_server_ctx *ctx)
 	for (i = 0; i < ARRAY_SIZE(ctx->fds); i++) {
 		ctx->fds[i].fd = INVALID_SOCK;
 	}
+
+	/* Clear stale events from a previous run. */
+	k_msgq_purge(&server_msgq);
 
 	/* Create an eventfd that can be used to trigger events during polling */
 	fd = zvfs_eventfd(0, 0);
@@ -1493,12 +1504,25 @@ static int http_server_run(struct http_server_ctx *ctx)
 			continue;
 		}
 
-		/* Stop event on fds[0] */
+		/* event on fds[0] */
 		if (ctx->fds[0].revents) {
 			zvfs_eventfd_read(ctx->fds[0].fd, &value);
-			LOG_DBG("Received stop event. exiting ..");
-			ret = 0;
-			goto closing;
+			/* Each writer increments by one, so eventfd value should match number of
+			 * messages queued in server_msgq.
+			 */
+			for (zvfs_eventfd_t msgs = 0u; msgs < value; ++msgs) {
+				struct http_server_cmd cmd;
+
+				if (k_msgq_get(&server_msgq, &cmd, K_NO_WAIT) != 0) {
+					LOG_DBG("Spurious event");
+					break;
+				}
+				if (cmd.command == HTTP_SERVER_CMD_STOP) {
+					LOG_DBG("Received stop event. exiting ..");
+					ret = 0;
+					goto closing;
+				}
+			}
 		}
 
 		/* Listen + client connection fds */
@@ -1981,14 +2005,23 @@ int http_server_start(void)
 
 int http_server_stop(void)
 {
+	int err;
+
 	if (!server_running) {
 		LOG_DBG("HTTP server already stopped");
 		return -EALREADY;
 	}
 
 	server_running = false;
-	k_sem_reset(&server_start);
+	err = k_msgq_put(&server_msgq, &(struct http_server_cmd){.command = HTTP_SERVER_CMD_STOP},
+			 K_NO_WAIT);
+	if (err != 0) {
+		LOG_WRN("Failed to stop HTTP server: k_msgq_put failed: %d", err);
+		server_running = true;
+		return err;
+	}
 	zvfs_eventfd_write(server_ctx.fds[0].fd, 1);
+	k_sem_reset(&server_start);
 
 	LOG_DBG("Stopping HTTP server");
 

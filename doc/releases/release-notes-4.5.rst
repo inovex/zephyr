@@ -993,6 +993,8 @@ New APIs and options
   * Add :kconfig:option:`CONFIG_NET_GPTP_STATIC_TIME_RECEIVER` to operate a gPTP node as a
     statically configured time receiver, so it can synchronize through IEEE 802.1AS automotive
     profile bridges that transmit no Announce messages.
+  * Add :c:func:`http_service_enable` and :c:func:`http_service_disable` to
+    control individual HTTP services at runtime.
 
 * POSIX
 

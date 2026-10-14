@@ -49,6 +49,7 @@ BUILD_ASSERT(CONFIG_HTTP_SERVER_VERSION > 0,
 #else
 #define HTTP_SERVER_SOCKETS_PER_SERVICE 1
 #endif
+#define HTTP_SERVER_HTTP3_SOCKET_IDX (HTTP_SERVER_SOCKETS_PER_SERVICE - 1)
 #define HTTP_SERVER_MAX_SERVICES CONFIG_HTTP_SERVER_NUM_SERVICES
 #define HTTP_SERVER_MAX_CLIENTS  CONFIG_HTTP_SERVER_MAX_CLIENTS
 #define HTTP_SERVER_SOCK_COUNT                                                                     \
@@ -71,7 +72,8 @@ static struct http_server_ctx server_ctx;
 static K_SEM_DEFINE(server_start, 0, 1);
 static bool server_running;
 
-#define HTTP_SERVER_CMD_STOP 1
+#define HTTP_SERVER_CMD_STOP            1
+#define HTTP_SERVER_CMD_RESCAN_SERVICES 2
 
 struct http_server_cmd {
 	int command;
@@ -358,7 +360,7 @@ static void check_service_version_config(const struct http_service_desc *svc)
 	}
 }
 
-static int setup_service(struct http_server_ctx *ctx, struct http_service_desc *svc,
+static int setup_service(struct http_service_desc *svc,
 			 struct zsock_pollfd fds[static HTTP_SERVER_SOCKETS_PER_SERVICE])
 {
 	struct net_sockaddr_storage addr_storage;
@@ -368,9 +370,13 @@ static int setup_service(struct http_server_ctx *ctx, struct http_service_desc *
 		struct net_sockaddr_in6 *addr6;
 	} addr = {.addr = (struct net_sockaddr *)&addr_storage};
 	bool h3 = false, h2 = false, h1 = false;
+	bool h12_ok = false, h3_ok = false;
 	net_socklen_t len;
 	int fd, af;
-	int count = 0;
+
+	if (svc->data->disabled) {
+		return 0;
+	}
 
 	/* set the default address (in6addr_any / NET_INADDR_ANY are all 0) */
 	memset(&addr_storage, 0, sizeof(struct net_sockaddr_storage));
@@ -411,8 +417,10 @@ static int setup_service(struct http_server_ctx *ctx, struct http_service_desc *
 	h1 = is_service_h1(svc);
 	h2 = is_service_h2(svc);
 	h3 = is_service_h3(svc);
+	h12_ok = fds[0].fd >= 0;
+	h3_ok = fds[HTTP_SERVER_HTTP3_SOCKET_IDX].fd >= 0;
 
-	if (h1 || h2) {
+	if ((h1 || h2) && !h12_ok) {
 		fd = setup_h1_h2_socket(svc, af, addr.addr, len);
 		if (fd >= 0) {
 			if (IS_ENABLED(CONFIG_NET_HTTP_SERVER_LOG_LEVEL_DBG)) {
@@ -431,26 +439,26 @@ static int setup_service(struct http_server_ctx *ctx, struct http_service_desc *
 			}
 
 			*svc->fd = fd;
-			fds[count].fd = fd;
-			fds[count].events = ZSOCK_POLLIN;
-			count++;
+			fds[0].fd = fd;
+			fds[0].events = ZSOCK_POLLIN;
+			h12_ok = true;
 		}
 	}
 
-	if (h3) {
+	if (h3 && !h3_ok) {
 		fd = setup_h3_socket(svc, af, addr.addr, len);
 		if (fd >= 0) {
 			LOG_DBG("Initialized HTTP%s Service %s:%u", "/3",
 				svc->host ? svc->host : "<any>", *svc->port);
 
 			*svc->fd_h3 = fd;
-			fds[count].fd = fd;
-			fds[count].events = ZSOCK_POLLIN;
-			count++;
+			fds[HTTP_SERVER_HTTP3_SOCKET_IDX].fd = fd;
+			fds[HTTP_SERVER_HTTP3_SOCKET_IDX].events = ZSOCK_POLLIN;
+			h3_ok = true;
 		}
 	}
 
-	return count > 0 ? 0 : -EIO;
+	return h12_ok || h3_ok ? 0 : -EIO;
 }
 
 int http_server_init(struct http_server_ctx *ctx)
@@ -493,8 +501,7 @@ int http_server_init(struct http_server_ctx *ctx)
 	i = 0;
 	HTTP_SERVICE_FOREACH(svc) {
 		check_service_version_config(svc);
-		int ret =
-			setup_service(ctx, svc, &ctx->fds[1 + i * HTTP_SERVER_SOCKETS_PER_SERVICE]);
+		int ret = setup_service(svc, &ctx->fds[1 + i * HTTP_SERVER_SOCKETS_PER_SERVICE]);
 		if (ret == 0) {
 			service_ok = true;
 		}
@@ -1505,6 +1512,57 @@ static void handle_h3_bidi_stream(struct http_server_ctx *ctx, int i,
 	}
 }
 
+static void http_server_rescan_svc(struct http_server_ctx *ctx)
+{
+	int i = 0;
+
+	HTTP_SERVICE_FOREACH(svc) {
+		if (svc->data->disabled &&
+		    (*svc->fd != -1 ||
+		     (IS_ENABLED(CONFIG_HTTP_SERVER_VERSION_3) && *svc->fd_h3 != -1))) {
+			/* Close service sockets */
+			if (ctx->fds[1 + i * HTTP_SERVER_SOCKETS_PER_SERVICE].fd != -1) {
+				zsock_close(ctx->fds[1 + i * HTTP_SERVER_SOCKETS_PER_SERVICE].fd);
+				invalidate_poll_fd(
+					&ctx->fds[1 + i * HTTP_SERVER_SOCKETS_PER_SERVICE]);
+			}
+			if (HTTP_SERVER_SOCKETS_PER_SERVICE == 2 &&
+			    ctx->fds[1 + i * HTTP_SERVER_SOCKETS_PER_SERVICE + 1].fd != -1) {
+				zsock_close(
+					ctx->fds[1 + i * HTTP_SERVER_SOCKETS_PER_SERVICE + 1].fd);
+				invalidate_poll_fd(
+					&ctx->fds[1 + i * HTTP_SERVER_SOCKETS_PER_SERVICE + 1]);
+			}
+			*svc->fd = -1;
+			if (IS_ENABLED(CONFIG_HTTP_SERVER_VERSION_3)) {
+				*svc->fd_h3 = -1;
+			}
+
+			/* Close client sockets and HTTP/3 stream sockets associated with disabled
+			 * service.
+			 */
+			for (int client = ctx->listen_fds; client < ctx->client_fds; ++client) {
+				if (ctx->fds[client].fd < 0) {
+					continue;
+				}
+				struct http_client_ctx *client_ctx =
+					&server_ctx.clients[client - ctx->listen_fds];
+				if (client_ctx->service == svc) {
+					close_h3_or_plain_client(client_ctx, ctx->fds,
+								 ARRAY_SIZE(ctx->fds));
+				}
+			}
+		} else if (!svc->data->disabled &&
+			   (((is_service_h1(svc) || is_service_h2(svc)) &&
+			     *svc->fd == INVALID_SOCK) ||
+			    (is_service_h3(svc) && *svc->fd_h3 == INVALID_SOCK))) {
+			/* Open service sockets */
+			setup_service(svc, &ctx->fds[1 + i * HTTP_SERVER_SOCKETS_PER_SERVICE]);
+		}
+		++i;
+	}
+}
+
 static int http_server_run(struct http_server_ctx *ctx)
 {
 	zvfs_eventfd_t value = 0;
@@ -1548,6 +1606,9 @@ static int http_server_run(struct http_server_ctx *ctx)
 					LOG_DBG("Received stop event. exiting ..");
 					ret = 0;
 					goto closing;
+				}
+				if (cmd.command == HTTP_SERVER_CMD_RESCAN_SERVICES) {
+					http_server_rescan_svc(ctx);
 				}
 			}
 		}
@@ -2053,6 +2114,37 @@ int http_server_stop(void)
 	LOG_DBG("Stopping HTTP server");
 
 	return 0;
+}
+
+static int http_service_internal_disable(const struct http_service_desc *service, bool disable)
+{
+	int err;
+	bool old_state;
+
+	old_state = service->data->disabled;
+	service->data->disabled = disable;
+	if (server_running) {
+		err = k_msgq_put(
+			&server_msgq,
+			&(struct http_server_cmd){.command = HTTP_SERVER_CMD_RESCAN_SERVICES},
+			K_NO_WAIT);
+		if (err != 0) {
+			service->data->disabled = old_state;
+			return err;
+		}
+		zvfs_eventfd_write(server_ctx.fds[0].fd, 1);
+	}
+	return 0;
+}
+
+int http_service_enable(const struct http_service_desc *service)
+{
+	return http_service_internal_disable(service, false);
+}
+
+int http_service_disable(const struct http_service_desc *service)
+{
+	return http_service_internal_disable(service, true);
 }
 
 static void http_server_thread(void *p1, void *p2, void *p3)

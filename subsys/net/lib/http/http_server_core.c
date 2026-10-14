@@ -304,21 +304,160 @@ out:
 	return ret;
 }
 
-int http_server_init(struct http_server_ctx *ctx)
+static bool is_service_h1(const struct http_service_desc *svc)
 {
-	int count = 0;
-	int svc_count;
-	net_socklen_t len;
-	int fd, af, i, required_fds;
-	bool h3 = false, h2 = false, h1 = false;
+	if (!IS_ENABLED(CONFIG_HTTP_SERVER_VERSION_1)) {
+		return false;
+	}
+	if (svc->config != NULL) {
+		return svc->config->http_ver & HTTP_VERSION_1 ||
+		       svc->config->http_ver == HTTP_VERSION_ANY;
+	}
+	return true;
+}
+
+static bool is_service_h2(const struct http_service_desc *svc)
+{
+	if (!IS_ENABLED(CONFIG_HTTP_SERVER_VERSION_2)) {
+		return false;
+	}
+	if (svc->config != NULL) {
+		return svc->config->http_ver & HTTP_VERSION_2 ||
+		       svc->config->http_ver == HTTP_VERSION_ANY;
+	}
+	return true;
+}
+
+static bool is_service_h3(const struct http_service_desc *svc)
+{
+	if (!IS_ENABLED(CONFIG_HTTP_SERVER_VERSION_3)) {
+		return false;
+	}
+	if (svc->config != NULL) {
+		return svc->config->http_ver & HTTP_VERSION_3 ||
+		       svc->config->http_ver == HTTP_VERSION_ANY;
+	}
+	return true;
+}
+
+static void check_service_version_config(const struct http_service_desc *svc)
+{
+	if (svc->config != NULL) {
+		if (svc->config->http_ver & HTTP_VERSION_1 &&
+		    !IS_ENABLED(CONFIG_HTTP_SERVER_VERSION_1)) {
+			NET_WARN("HTTP/%d is not enabled but service requires it!", 1);
+		}
+		if (svc->config->http_ver & HTTP_VERSION_2 &&
+		    !IS_ENABLED(CONFIG_HTTP_SERVER_VERSION_2)) {
+			NET_WARN("HTTP/%d is not enabled but service requires it!", 2);
+		}
+		if (svc->config->http_ver & HTTP_VERSION_3 &&
+		    !IS_ENABLED(CONFIG_HTTP_SERVER_VERSION_3)) {
+			NET_WARN("HTTP/%d is not enabled but service requires it!", 3);
+		}
+	}
+}
+
+static int setup_service(struct http_server_ctx *ctx, struct http_service_desc *svc,
+			 struct zsock_pollfd fds[static HTTP_SERVER_SOCKETS_PER_SERVICE])
+{
 	struct net_sockaddr_storage addr_storage;
 	const union {
 		struct net_sockaddr *addr;
 		struct net_sockaddr_in *addr4;
 		struct net_sockaddr_in6 *addr6;
-	} addr = {
-		.addr = (struct net_sockaddr *)&addr_storage
-	};
+	} addr = {.addr = (struct net_sockaddr *)&addr_storage};
+	bool h3 = false, h2 = false, h1 = false;
+	net_socklen_t len;
+	int fd, af;
+	int count = 0;
+
+	/* set the default address (in6addr_any / NET_INADDR_ANY are all 0) */
+	memset(&addr_storage, 0, sizeof(struct net_sockaddr_storage));
+
+	/* Set up the server address struct according to address family */
+	if (IS_ENABLED(CONFIG_NET_IPV6) && svc->host != NULL &&
+	    zsock_inet_pton(NET_AF_INET6, svc->host, &addr.addr6->sin6_addr) == 1) {
+		af = NET_AF_INET6;
+		len = sizeof(*addr.addr6);
+
+		addr.addr6->sin6_family = NET_AF_INET6;
+		addr.addr6->sin6_port = net_htons(*svc->port);
+	} else if (IS_ENABLED(CONFIG_NET_IPV4) && svc->host != NULL &&
+		   zsock_inet_pton(NET_AF_INET, svc->host, &addr.addr4->sin_addr) == 1) {
+		af = NET_AF_INET;
+		len = sizeof(*addr.addr4);
+
+		addr.addr4->sin_family = NET_AF_INET;
+		addr.addr4->sin_port = net_htons(*svc->port);
+	} else if (IS_ENABLED(CONFIG_NET_IPV6)) {
+		/* prefer IPv6 if both IPv6 and IPv4 are supported */
+		af = NET_AF_INET6;
+		len = sizeof(*addr.addr6);
+
+		addr.addr6->sin6_family = NET_AF_INET6;
+		addr.addr6->sin6_port = net_htons(*svc->port);
+	} else if (IS_ENABLED(CONFIG_NET_IPV4)) {
+		af = NET_AF_INET;
+		len = sizeof(*addr.addr4);
+
+		addr.addr4->sin_family = NET_AF_INET;
+		addr.addr4->sin_port = net_htons(*svc->port);
+	} else {
+		LOG_ERR("Neither IPv4 nor IPv6 is enabled");
+		return -EINVAL;
+	}
+
+	h1 = is_service_h1(svc);
+	h2 = is_service_h2(svc);
+	h3 = is_service_h3(svc);
+
+	if (h1 || h2) {
+		fd = setup_h1_h2_socket(svc, af, addr.addr, len);
+		if (fd >= 0) {
+			if (IS_ENABLED(CONFIG_NET_HTTP_SERVER_LOG_LEVEL_DBG)) {
+				char ver_str[sizeof("/1.1/2")] = {0};
+
+				if (h1) {
+					strcat(ver_str, "/1.1");
+				}
+
+				if (h2) {
+					strcat(ver_str, "/2");
+				}
+
+				LOG_DBG("Initialized HTTP%s Service %s:%u", ver_str,
+					svc->host ? svc->host : "<any>", *svc->port);
+			}
+
+			*svc->fd = fd;
+			fds[count].fd = fd;
+			fds[count].events = ZSOCK_POLLIN;
+			count++;
+		}
+	}
+
+	if (h3) {
+		fd = setup_h3_socket(svc, af, addr.addr, len);
+		if (fd >= 0) {
+			LOG_DBG("Initialized HTTP%s Service %s:%u", "/3",
+				svc->host ? svc->host : "<any>", *svc->port);
+
+			*svc->fd_h3 = fd;
+			fds[count].fd = fd;
+			fds[count].events = ZSOCK_POLLIN;
+			count++;
+		}
+	}
+
+	return count > 0 ? 0 : -EIO;
+}
+
+int http_server_init(struct http_server_ctx *ctx)
+{
+	int svc_count;
+	int fd, i, required_fds;
+	bool service_ok = false;
 
 	HTTP_SERVICE_COUNT(&svc_count);
 
@@ -348,140 +487,28 @@ int http_server_init(struct http_server_ctx *ctx)
 		return fd;
 	}
 
-	ctx->fds[count].fd = fd;
-	ctx->fds[count].events = ZSOCK_POLLIN;
-	count++;
+	ctx->fds[0].fd = fd;
+	ctx->fds[0].events = ZSOCK_POLLIN;
 
+	i = 0;
 	HTTP_SERVICE_FOREACH(svc) {
-		/* set the default address (in6addr_any / NET_INADDR_ANY are all 0) */
-		memset(&addr_storage, 0, sizeof(struct net_sockaddr_storage));
-
-		h1 = h2 = h3 = false;
-
-		/* Set up the server address struct according to address family */
-		if (IS_ENABLED(CONFIG_NET_IPV6) && svc->host != NULL &&
-		    zsock_inet_pton(NET_AF_INET6, svc->host, &addr.addr6->sin6_addr) == 1) {
-			af = NET_AF_INET6;
-			len = sizeof(*addr.addr6);
-
-			addr.addr6->sin6_family = NET_AF_INET6;
-			addr.addr6->sin6_port = net_htons(*svc->port);
-		} else if (IS_ENABLED(CONFIG_NET_IPV4) && svc->host != NULL &&
-			   zsock_inet_pton(NET_AF_INET, svc->host, &addr.addr4->sin_addr) == 1) {
-			af = NET_AF_INET;
-			len = sizeof(*addr.addr4);
-
-			addr.addr4->sin_family = NET_AF_INET;
-			addr.addr4->sin_port = net_htons(*svc->port);
-		} else if (IS_ENABLED(CONFIG_NET_IPV6)) {
-			/* prefer IPv6 if both IPv6 and IPv4 are supported */
-			af = NET_AF_INET6;
-			len = sizeof(*addr.addr6);
-
-			addr.addr6->sin6_family = NET_AF_INET6;
-			addr.addr6->sin6_port = net_htons(*svc->port);
-		} else if (IS_ENABLED(CONFIG_NET_IPV4)) {
-			af = NET_AF_INET;
-			len = sizeof(*addr.addr4);
-
-			addr.addr4->sin_family = NET_AF_INET;
-			addr.addr4->sin_port = net_htons(*svc->port);
-		} else {
-			LOG_ERR("Neither IPv4 nor IPv6 is enabled");
-			break;
+		check_service_version_config(svc);
+		int ret =
+			setup_service(ctx, svc, &ctx->fds[1 + i * HTTP_SERVER_SOCKETS_PER_SERVICE]);
+		if (ret == 0) {
+			service_ok = true;
 		}
-
-		/* Allow application to specify which HTTP versions to support
-		 * at runtime. If not specified, support all enabled versions.
-		 */
-		if (svc->config != NULL) {
-			if (svc->config->http_ver & HTTP_VERSION_3) {
-				if (!IS_ENABLED(CONFIG_HTTP_SERVER_VERSION_3)) {
-					NET_WARN("HTTP/%d is not enabled but service requires it!",
-						 3);
-				} else {
-					h3 = true;
-				}
-			}
-
-			if (svc->config->http_ver & HTTP_VERSION_2) {
-				if (!IS_ENABLED(CONFIG_HTTP_SERVER_VERSION_2)) {
-					NET_WARN("HTTP/%d is not enabled but service requires it!",
-						 2);
-				} else {
-					h2 = true;
-				}
-			}
-
-			if (svc->config->http_ver & HTTP_VERSION_1) {
-				if (!IS_ENABLED(CONFIG_HTTP_SERVER_VERSION_1)) {
-					NET_WARN("HTTP/%d is not enabled but service requires it!",
-						 1);
-				} else {
-					h1 = true;
-				}
-			}
-
-			if (svc->config->http_ver == HTTP_VERSION_ANY) {
-				h1 = IS_ENABLED(CONFIG_HTTP_SERVER_VERSION_1);
-				h2 = IS_ENABLED(CONFIG_HTTP_SERVER_VERSION_2);
-				h3 = IS_ENABLED(CONFIG_HTTP_SERVER_VERSION_3);
-			}
-		} else {
-			h1 = IS_ENABLED(CONFIG_HTTP_SERVER_VERSION_1);
-			h2 = IS_ENABLED(CONFIG_HTTP_SERVER_VERSION_2);
-			h3 = IS_ENABLED(CONFIG_HTTP_SERVER_VERSION_3);
-		}
-
-		if (h1 || h2) {
-			fd = setup_h1_h2_socket(svc, af, addr.addr, len);
-			if (fd >= 0) {
-				if (IS_ENABLED(CONFIG_NET_HTTP_SERVER_LOG_LEVEL_DBG)) {
-					char ver_str[sizeof("/1.1/2")] = {0};
-
-					if (h1) {
-						strcat(ver_str, "/1.1");
-					}
-
-					if (h2) {
-						strcat(ver_str, "/2");
-					}
-
-					LOG_DBG("Initialized HTTP%s Service %s:%u",
-						ver_str,
-						svc->host ? svc->host : "<any>",
-						*svc->port);
-				}
-
-				*svc->fd = fd;
-				ctx->fds[count].fd = fd;
-				ctx->fds[count].events = ZSOCK_POLLIN;
-				count++;
-			}
-		}
-
-		if (h3 && IS_ENABLED(CONFIG_HTTP_SERVER_VERSION_3)) {
-			fd = setup_h3_socket(svc, af, addr.addr, len);
-			if (fd >= 0) {
-				LOG_DBG("Initialized HTTP%s Service %s:%u", "/3",
-					svc->host ? svc->host : "<any>", *svc->port);
-
-				*svc->fd_h3 = fd;
-				ctx->fds[count].fd = fd;
-				ctx->fds[count].events = ZSOCK_POLLIN;
-				count++;
-			}
-		}
+		++i;
 	}
 
-	if (count == 1) {
+	if (!service_ok) {
 		LOG_ERR("All services failed");
 		/* Close eventfd socket */
 		zsock_close(ctx->fds[0].fd);
 		return -ESRCH;
 	}
 
-	ctx->listen_fds = count;
+	ctx->listen_fds = 1 + svc_count * HTTP_SERVER_SOCKETS_PER_SERVICE;
 	ctx->client_fds = ctx->listen_fds + HTTP_SERVER_MAX_CLIENTS;
 
 	required_fds = ctx->client_fds + HTTP3_SERVER_MAX_STREAMS;

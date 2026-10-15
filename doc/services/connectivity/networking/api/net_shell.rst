@@ -46,8 +46,8 @@ The following net-shell commands are implemented:
    :kconfig:option:`CONFIG_FTP_CLIENT` is set."
    "net gptp", "Print information about gPTP support. Only available if
    :kconfig:option:`CONFIG_NET_GPTP` is set."
-   "net http", "Show HTTP server information, or send HTTP GET/POST/PUT/DELETE requests.
-   Only available if :kconfig:option:`CONFIG_HTTP_SERVER` or
+   "net http", "Show HTTP server information, enable or disable HTTP services, or send
+   HTTP GET/POST/PUT/DELETE requests. Only available if :kconfig:option:`CONFIG_HTTP_SERVER` or
    :kconfig:option:`CONFIG_HTTP_CLIENT` is set."
    "net iface", "Print information about network interfaces."
    "net ipv4", "Print IPv4 specific information and configuration.

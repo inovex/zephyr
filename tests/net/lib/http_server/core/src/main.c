@@ -18,6 +18,7 @@
 #define BUFFER_SIZE                    1024
 #define SERVER_IPV4_ADDR               "127.0.0.1"
 #define SERVER_PORT                    8080
+#define SERVER_PORT_2                  8081
 #define TIMEOUT_S                      1
 
 #define UPGRADE_STREAM_ID              1
@@ -27,6 +28,7 @@
 #define TEST_DYNAMIC_POST_PAYLOAD "Test dynamic POST"
 #define TEST_DYNAMIC_GET_PAYLOAD "Test dynamic GET"
 #define TEST_STATIC_PAYLOAD "Hello, World!"
+#define TEST_STATIC_PAYLOAD_2 "Hello, Service 2!"
 #define TEST_STATIC_FS_PAYLOAD "Hello, World from static file!"
 #define TEST_LONG_HEADER_NAME "Test-Header-With-A-Name-Longer-Than-The-Response-Format-Buffer"
 #define TEST_LONG_CONTENT_TYPE "application/vnd.zephyr.example-type+json"
@@ -251,6 +253,24 @@ BUILD_ASSERT(sizeof(long_payload) - 1 > CONFIG_HTTP_SERVER_CLIENT_BUFFER_SIZE,
 static uint16_t test_http_service_port = SERVER_PORT;
 HTTP_SERVICE_DEFINE(test_http_service, SERVER_IPV4_ADDR,
 		    &test_http_service_port, 1, 10, NULL, NULL, NULL);
+
+/* Second service, used to test enabling/disabling services at runtime */
+static uint16_t test_http_service_2_port = SERVER_PORT_2;
+HTTP_SERVICE_DEFINE(test_http_service_2, SERVER_IPV4_ADDR,
+		    &test_http_service_2_port, 1, 10, NULL, NULL, NULL);
+
+static const char static_resource_2_payload[] = TEST_STATIC_PAYLOAD_2;
+struct http_resource_detail_static static_resource_2_detail = {
+	.common = {
+			.type = HTTP_RESOURCE_TYPE_STATIC,
+			.bitmask_of_supported_http_methods = BIT(HTTP_GET),
+		},
+	.static_data = static_resource_2_payload,
+	.static_data_len = sizeof(static_resource_2_payload) - 1,
+};
+
+HTTP_RESOURCE_DEFINE(static_resource_2, test_http_service_2, "/",
+		     &static_resource_2_detail);
 
 static const char static_resource_payload[] = TEST_STATIC_PAYLOAD;
 struct http_resource_detail_static static_resource_detail = {
@@ -3564,6 +3584,203 @@ static void http_server_tests_before(void *fixture)
 	}
 }
 
+/* Tests for enabling/disabling services at runtime */
+
+#define SERVICE_STATE_RETRIES  100
+#define SERVICE_STATE_DELAY_MS 10
+
+static int connect_to_port(uint16_t port)
+{
+	struct net_sockaddr_in sa = {
+		.sin_family = NET_AF_INET,
+		.sin_port = net_htons(port),
+	};
+	struct timeval optval = {
+		.tv_sec = TIMEOUT_S,
+		.tv_usec = 0,
+	};
+	int fd;
+	int ret;
+
+	ret = zsock_inet_pton(NET_AF_INET, SERVER_IPV4_ADDR, &sa.sin_addr.s_addr);
+	zassert_equal(ret, 1, "inet_pton() failed");
+
+	fd = zsock_socket(NET_AF_INET, NET_SOCK_STREAM, NET_IPPROTO_TCP);
+	zassert_true(fd >= 0, "socket() failed (%d)", errno);
+
+	ret = zsock_setsockopt(fd, ZSOCK_SOL_SOCKET, ZSOCK_SO_RCVTIMEO, &optval, sizeof(optval));
+	zassert_ok(ret, "setsockopt() failed (%d)", errno);
+
+	ret = zsock_connect(fd, (struct net_sockaddr *)&sa, sizeof(sa));
+	if (ret < 0) {
+		ret = -errno;
+		(void)zsock_close(fd);
+		return ret;
+	}
+
+	return fd;
+}
+
+/* Service enable/disable is asynchronous, wait until the port reaches the expected state */
+static void wait_for_port_state(uint16_t port, bool open)
+{
+	for (int i = 0; i < SERVICE_STATE_RETRIES; i++) {
+		int fd = connect_to_port(port);
+
+		if (fd >= 0) {
+			(void)zsock_close(fd);
+			if (open) {
+				return;
+			}
+		} else if (!open) {
+			return;
+		}
+
+		k_msleep(SERVICE_STATE_DELAY_MS);
+	}
+
+	zassert_unreachable("Port %u did not become %s", port, open ? "reachable" : "unreachable");
+}
+
+static void expect_static_get(int fd, const char *payload)
+{
+	static const char request[] = "GET / HTTP/1.1\r\n"
+				      "Host: 127.0.0.1\r\n"
+				      "Accept: */*\r\n"
+				      "\r\n";
+	char response[256] = {0};
+	size_t received = 0;
+	int ret;
+
+	ret = zsock_send(fd, request, sizeof(request) - 1, 0);
+	zassert_not_equal(ret, -1, "send() failed (%d)", errno);
+
+	while (strstr(response, payload) == NULL) {
+		ret = zsock_recv(fd, response + received, sizeof(response) - 1 - received, 0);
+		zassert_true(ret > 0, "Response with payload '%s' not received (%d)", payload,
+			     ret);
+		received += ret;
+	}
+
+	zassert_not_null(strstr(response, "200 OK"), "Unexpected response: %s", response);
+}
+
+static void expect_connection_closed(int fd)
+{
+	char dummy;
+	int ret = zsock_recv(fd, &dummy, sizeof(dummy), 0);
+
+	zassert_true(ret == 0 || (ret == -1 && errno == ECONNRESET),
+		     "Connection should have been closed (%d, errno %d)", ret, errno);
+}
+
+ZTEST(server_function_tests, test_service_disable_enable_running)
+{
+	int fd;
+
+	/* Both services are enabled by default */
+	fd = connect_to_port(SERVER_PORT_2);
+	zassert_true(fd >= 0, "Service 2 should be reachable (%d)", fd);
+	expect_static_get(fd, TEST_STATIC_PAYLOAD_2);
+	(void)zsock_close(fd);
+
+	zassert_ok(http_service_disable(&test_http_service_2));
+	wait_for_port_state(SERVER_PORT_2, false);
+
+	/* Disabling service 2 must not affect service 1, including the existing connection */
+	expect_static_get(client_fd, TEST_STATIC_PAYLOAD);
+	fd = connect_to_port(SERVER_PORT);
+	zassert_true(fd >= 0, "Service 1 should be reachable (%d)", fd);
+	(void)zsock_close(fd);
+
+	/* Disabling again is a no-op */
+	zassert_ok(http_service_disable(&test_http_service_2));
+	wait_for_port_state(SERVER_PORT_2, false);
+
+	zassert_ok(http_service_enable(&test_http_service_2));
+	wait_for_port_state(SERVER_PORT_2, true);
+
+	fd = connect_to_port(SERVER_PORT_2);
+	zassert_true(fd >= 0, "Service 2 should be reachable again (%d)", fd);
+	expect_static_get(fd, TEST_STATIC_PAYLOAD_2);
+	(void)zsock_close(fd);
+
+	expect_static_get(client_fd, TEST_STATIC_PAYLOAD);
+}
+
+ZTEST(server_function_tests, test_service_disable_enable_active_clients)
+{
+	int fd2;
+	int fd;
+
+	fd2 = connect_to_port(SERVER_PORT_2);
+	zassert_true(fd2 >= 0, "Service 2 should be reachable (%d)", fd2);
+	expect_static_get(fd2, TEST_STATIC_PAYLOAD_2);
+
+	/* client_fd is connected to service 1 and has an open connection as well */
+	expect_static_get(client_fd, TEST_STATIC_PAYLOAD);
+
+	zassert_ok(http_service_disable(&test_http_service_2));
+
+	/* Client connection of the disabled service gets closed by the server */
+	expect_connection_closed(fd2);
+	(void)zsock_close(fd2);
+	wait_for_port_state(SERVER_PORT_2, false);
+
+	/* Client connection of the other service remains usable */
+	expect_static_get(client_fd, TEST_STATIC_PAYLOAD);
+
+	/* The client slot must have been released, so service 2 works again once enabled */
+	zassert_ok(http_service_enable(&test_http_service_2));
+	wait_for_port_state(SERVER_PORT_2, true);
+
+	fd = connect_to_port(SERVER_PORT_2);
+	zassert_true(fd >= 0, "Service 2 should be reachable again (%d)", fd);
+	expect_static_get(fd, TEST_STATIC_PAYLOAD_2);
+	(void)zsock_close(fd);
+
+	expect_static_get(client_fd, TEST_STATIC_PAYLOAD);
+}
+
+ZTEST(server_function_tests, test_service_disable_enable_stopped)
+{
+	int fd;
+
+	(void)zsock_close(client_fd);
+	client_fd = -1;
+
+	zassert_ok(http_server_stop());
+	wait_for_port_state(SERVER_PORT, false);
+	wait_for_port_state(SERVER_PORT_2, false);
+
+	/* Disabled while the server is stopped: only service 1 comes up on start */
+	zassert_ok(http_service_disable(&test_http_service_2));
+	zassert_ok(http_server_start());
+	wait_for_port_state(SERVER_PORT, true);
+
+	fd = connect_to_port(SERVER_PORT_2);
+	zassert_equal(fd, -ECONNREFUSED, "Disabled service 2 should not be reachable (%d)", fd);
+
+	fd = connect_to_port(SERVER_PORT);
+	zassert_true(fd >= 0, "Service 1 should be reachable (%d)", fd);
+	expect_static_get(fd, TEST_STATIC_PAYLOAD);
+	(void)zsock_close(fd);
+
+	/* Enabled again while the server is stopped: both services come up on start */
+	zassert_ok(http_server_stop());
+	wait_for_port_state(SERVER_PORT, false);
+
+	zassert_ok(http_service_enable(&test_http_service_2));
+	zassert_ok(http_server_start());
+	wait_for_port_state(SERVER_PORT, true);
+	wait_for_port_state(SERVER_PORT_2, true);
+
+	fd = connect_to_port(SERVER_PORT_2);
+	zassert_true(fd >= 0, "Service 2 should be reachable (%d)", fd);
+	expect_static_get(fd, TEST_STATIC_PAYLOAD_2);
+	(void)zsock_close(fd);
+}
+
 static void http_server_tests_after(void *fixture)
 {
 	ARG_UNUSED(fixture);
@@ -3573,6 +3790,8 @@ static void http_server_tests_after(void *fixture)
 		client_fd = -1;
 	}
 
+	/* Don't leak the disabled state into following tests */
+	(void)http_service_enable(&test_http_service_2);
 	(void)http_server_stop();
 
 	k_yield();

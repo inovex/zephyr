@@ -100,6 +100,9 @@ struct http_resource_detail {
 
 	/** Content type of the resource. */
 	const char *content_type;
+
+	/** Flag if the resource is disabled. */
+	bool disabled;
 };
 
 /** @cond INTERNAL_HIDDEN */
@@ -635,6 +638,29 @@ int http_server_start(void);
  * All server sockets are closed and the server thread is suspended.
  */
 int http_server_stop(void);
+
+/** @brief Enable an HTTP service.
+ *
+ * Enables a previously disabled HTTP service again. This can be called if the
+ * server is stopped or while it is running. Enabling a service while the HTTP
+ * server is running wakes the HTTP server thread and it will open the listen
+ * socket(s) for the service.
+ *
+ * @param service Pointer to an HTTP service
+ */
+int http_service_enable(const struct http_service_desc *service);
+
+/** @brief Disable an HTTP service.
+ *
+ * Disables an HTTP service. By default, all defined services are enabled. This
+ * can be called if the server is stopped or while it is running. Disabling a
+ * service while the HTTP server is running wakes the HTTP server thread and it
+ * will close the service's socket(s) and any open client connections to this
+ * service.
+ *
+ * @param service Pointer to an HTTP service
+ */
+int http_service_disable(const struct http_service_desc *service);
 
 #ifdef __cplusplus
 }

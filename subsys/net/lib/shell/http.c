@@ -78,8 +78,8 @@ static int cmd_net_http(const struct shell *sh, size_t argc, char *argv[])
 #if defined(CONFIG_HTTP_SERVER)
 	int res_count = 0, serv_count = 0;
 
-	PR("%-15s\t%-19s\t%s\n",
-	   "Host:Port", "Concurrent/Backlog", "Protocols");
+	PR("%-15s\t%-19s\t%s\t%s\n",
+	   "Host:Port", "Concurrent/Backlog", "Enabled", "Protocols");
 	PR("\tResource type\tMethods\t\tEnabled\tEndpoint\n");
 
 	HTTP_SERVICE_FOREACH(svc) {
@@ -89,10 +89,11 @@ static int cmd_net_http(const struct shell *sh, size_t argc, char *argv[])
 			 svc->concurrent, svc->backlog);
 
 		PR("\n");
-		PR("%s:%d\t%-19s\t%s\n",
+		PR("%s:%d\t%-19s\t%s\t%s\n",
 		   svc->host == NULL || svc->host[0] == '\0' ?
 		   "<any>" : svc->host, svc->port ? *svc->port : 0,
 		   backlog_buf,
+		   svc->data->disabled ? "no" : "yes",
 		   http_protocols_str(svc));
 
 		HTTP_SERVICE_FOREACH_RESOURCE(svc, res) {
@@ -160,12 +161,93 @@ static int cmd_net_http(const struct shell *sh, size_t argc, char *argv[])
 	return 0;
 }
 
+static int http_service_set_enabled(const struct shell *sh, size_t argc, char *argv[],
+				    bool enable)
+{
+#if defined(CONFIG_HTTP_SERVER)
+	const char *host = argc > 2 ? argv[2] : NULL;
+	int found = 0;
+	unsigned long port;
+	char *end;
+
+	port = strtoul(argv[1], &end, 10);
+	if (*end != '\0' || end == argv[1] || port > UINT16_MAX) {
+		PR_WARNING("Invalid port \"%s\"\n", argv[1]);
+		return -EINVAL;
+	}
+
+	HTTP_SERVICE_FOREACH(svc) {
+		const char *svc_host = svc->host == NULL ? "" : svc->host;
+		int ret;
+
+		if (svc->port == NULL || *svc->port != port) {
+			continue;
+		}
+
+		if (host != NULL && strcmp(host, "<any>") != 0 && strcmp(host, svc_host) != 0) {
+			continue;
+		}
+
+		if (host != NULL && strcmp(host, "<any>") == 0 && svc_host[0] != '\0') {
+			continue;
+		}
+
+		ret = enable ? http_service_enable(svc) : http_service_disable(svc);
+		if (ret < 0) {
+			PR_WARNING("Failed to %s service %s:%lu (%d)\n",
+				   enable ? "enable" : "disable",
+				   svc_host[0] == '\0' ? "<any>" : svc_host, port, ret);
+			return ret;
+		}
+
+		PR("%s service %s:%lu\n", enable ? "Enabled" : "Disabled",
+		   svc_host[0] == '\0' ? "<any>" : svc_host, port);
+		found++;
+	}
+
+	if (found == 0) {
+		PR_WARNING("No HTTP service found for port %lu\n", port);
+		return -ENOENT;
+	}
+#else
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+	ARG_UNUSED(enable);
+
+	PR_INFO("Set %s to enable %s support.\n",
+		"CONFIG_HTTP_SERVER",
+		"HTTP service");
+#endif
+
+	return 0;
+}
+
+static int cmd_net_http_enable(const struct shell *sh, size_t argc, char *argv[])
+{
+	return http_service_set_enabled(sh, argc, argv, true);
+}
+
+static int cmd_net_http_disable(const struct shell *sh, size_t argc, char *argv[])
+{
+	return http_service_set_enabled(sh, argc, argv, false);
+}
+
 /* clang-format off */
 SHELL_SUBCMD_SET_CREATE(sub_http, (net, http));
 
 SHELL_SUBCMD_ADD((net, http), services, NULL,
 		 SHELL_HELP("Show HTTP services", NULL),
 		 cmd_net_http, 1, 0);
+
+SHELL_SUBCMD_ADD((net, http), enable, NULL,
+		 SHELL_HELP("Enable an HTTP service",
+			    "<port> [host|<any>]"),
+		 cmd_net_http_enable, 2, 1);
+
+SHELL_SUBCMD_ADD((net, http), disable, NULL,
+		 SHELL_HELP("Disable an HTTP service",
+			    "<port> [host|<any>]"),
+		 cmd_net_http_disable, 2, 1);
 
 SHELL_SUBCMD_ADD((net), http, &sub_http,
 		 SHELL_HELP("HTTP commands", NULL),

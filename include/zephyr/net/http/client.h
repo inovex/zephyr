@@ -244,6 +244,12 @@ struct http_client_internal_data {
 
 	/** Set when the response callback aborted the transfer */
 	bool aborted;
+
+	/** Bytes already received in the current request */
+	int total_received;
+
+	/** Processing offset in the receive buffer */
+	size_t offset;
 };
 
 /**
@@ -359,6 +365,41 @@ struct http_request {
  */
 int http_client_req(int sock, struct http_request *req,
 		    int32_t timeout, void *user_data);
+
+/**
+ * @brief Start a HTTP request. The caller must have created a connection to the
+ * server before calling this function so connect() call must have be done
+ * successfully for the socket. The function will return after the request has
+ * been sent. Call http_client_req_process() periodically or after poll() on the
+ * socket to process the response as it arrives.
+ *
+ * This function may still block if the socket blocks while sending the request.
+ *
+ * @param sock Socket id of the connection.
+ * @param req HTTP request information
+ * @param timeout Max timeout to send the request.
+ *        The timeout value is in milliseconds.
+ * @param user_data User specified data that is passed to the callback.
+ *
+ * @return <0 if error, >=0 amount of data sent to the server
+ */
+int http_client_req_start(int sock, struct http_request *req, int32_t timeout, void *user_data);
+
+/**
+ * @brief Continue processing HTTP request previously started with
+ * http_client_req_start(). This function should be called periodically or after
+ * a poll() on the socket indicated ZSOCK_POLLIN.
+ *
+ * This function does not track the response timeout. If required, the caller
+ * needs to track the timeout itself and abandon the http_request if no complete
+ * response is received after a suitable time.
+ *
+ * @param req HTTP request information
+ *
+ * @return <0 if error, 0 if this function should be called again, 1 when the
+ * request is complete
+ */
+int http_client_req_process(struct http_request *req);
 
 #ifdef __cplusplus
 }

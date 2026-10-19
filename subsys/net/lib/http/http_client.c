@@ -497,11 +497,92 @@ static int http_report_progress(struct http_request *req)
 	return 0;
 }
 
+static int http_process(struct http_request *req)
+{
+	int sock = req->internal.sock;
+	int received, ret;
+	size_t processed = 0;
+
+	received = zsock_recv(sock, req->internal.response.recv_buf + req->internal.offset,
+			      req->internal.response.recv_buf_len - req->internal.offset, 0);
+	if (received == 0 && req->internal.total_received == 0) {
+		/* Connection closed, no data received */
+		return 0;
+	} else if (received < 0) {
+		return -errno;
+	}
+
+	req->internal.total_received += received;
+	req->internal.offset += received;
+
+	/* Initialize the data length with the received data length. */
+	req->internal.response.data_len = req->internal.offset;
+
+	/* In case of EOF on a socket, indicate this by passing
+	 * 0 length to the parser.
+	 */
+	processed = http_parser_execute(&req->internal.parser, &req->internal.parser_settings,
+					req->internal.response.recv_buf,
+					received > 0 ? req->internal.offset : 0);
+
+	if (processed > req->internal.offset) {
+		LOG_ERR("HTTP parser error, too much data consumed");
+		return -EBADMSG;
+	}
+
+	if (req->internal.aborted) {
+		LOG_DBG("Connection aborted by the application");
+		return -ECONNABORTED;
+	}
+
+	if (req->internal.parser.http_errno != HPE_OK) {
+		LOG_ERR("HTTP parsing error, %d", req->internal.parser.http_errno);
+		return -EBADMSG;
+	}
+
+	/* Update the response data length with the actually
+	 * processed bytes.
+	 */
+	req->internal.response.data_len = processed;
+	req->internal.offset -= processed;
+
+	if (req->internal.offset >= req->internal.response.recv_buf_len) {
+		/* This means the parser did not consume any data
+		 * and we can't fit any more in the buffer.
+		 */
+		LOG_ERR("HTTP RX buffer full, cannot proceed");
+		return -ENOMEM;
+	}
+
+	if (req->internal.response.message_complete) {
+		http_report_complete(req);
+	} else {
+		ret = http_report_progress(req);
+		if (ret < 0) {
+			LOG_DBG("Connection aborted by the application (%d)", ret);
+			return -ECONNABORTED;
+		}
+
+		/* Re-use the result buffer and start to fill it again */
+		req->internal.response.data_len = 0;
+		req->internal.response.body_frag_start = NULL;
+		req->internal.response.body_frag_len = 0;
+	}
+
+	if (req->internal.offset > 0) {
+		/* In case there are any unprocessed data left,
+		 * move them to the front of the buffer.
+		 */
+		memmove(req->internal.response.recv_buf,
+			req->internal.response.recv_buf + processed, req->internal.offset);
+	}
+
+	return req->internal.total_received;
+}
+
 static int http_wait_data(int sock, struct http_request *req, const k_timepoint_t req_end_timepoint)
 {
-	int total_received = 0;
-	size_t offset = 0, processed = 0;
-	int received, ret;
+	int ret;
 	struct zsock_pollfd fds[1];
 	int nfds = 1;
 
@@ -536,85 +617,11 @@ static int http_wait_data(int sock, struct http_request *req, const k_timepoint_
 			ret = -EBADF;
 			goto error;
 		} else if (fds[0].revents & ZSOCK_POLLIN) {
-			received = zsock_recv(sock, req->internal.response.recv_buf + offset,
-					      req->internal.response.recv_buf_len - offset, 0);
-			if (received == 0 && total_received == 0) {
-				/* Connection closed, no data received */
+			ret = http_process(req);
+			if (ret == 0) {
 				goto closed;
-			} else if (received < 0) {
-				ret = -errno;
+			} else if (ret < 0) {
 				goto error;
-			}
-
-			total_received += received;
-			offset += received;
-
-			/* Initialize the data length with the received data length. */
-			req->internal.response.data_len = offset;
-
-			/* In case of EOF on a socket, indicate this by passing
-			 * 0 length to the parser.
-			 */
-			processed = http_parser_execute(
-				&req->internal.parser, &req->internal.parser_settings,
-				req->internal.response.recv_buf, received > 0 ? offset : 0);
-
-			if (processed > offset) {
-				LOG_ERR("HTTP parser error, too much data consumed");
-				ret = -EBADMSG;
-				goto error;
-			}
-
-			if (req->internal.aborted) {
-				LOG_DBG("Connection aborted by the application");
-				return -ECONNABORTED;
-			}
-
-			if (req->internal.parser.http_errno != HPE_OK) {
-				LOG_ERR("HTTP parsing error, %d",
-					req->internal.parser.http_errno);
-				ret = -EBADMSG;
-				goto error;
-			}
-
-			/* Update the response data length with the actually
-			 * processed bytes.
-			 */
-			req->internal.response.data_len = processed;
-			offset -= processed;
-
-			if (offset >= req->internal.response.recv_buf_len) {
-				/* This means the parser did not consume any data
-				 * and we can't fit any more in the buffer.
-				 */
-				LOG_ERR("HTTP RX buffer full, cannot proceed");
-				ret = -ENOMEM;
-				goto error;
-			}
-
-			if (req->internal.response.message_complete) {
-				http_report_complete(req);
-			} else {
-				ret = http_report_progress(req);
-				if (ret < 0) {
-					LOG_DBG("Connection aborted by the application (%d)",
-						ret);
-					return -ECONNABORTED;
-				}
-
-				/* Re-use the result buffer and start to fill it again */
-				req->internal.response.data_len = 0;
-				req->internal.response.body_frag_start = NULL;
-				req->internal.response.body_frag_len = 0;
-			}
-
-			if (offset > 0) {
-				/* In case there are any unprocessed data left,
-				 * move them to the front of the buffer.
-				 */
-				memmove(req->internal.response.recv_buf,
-					req->internal.response.recv_buf + processed,
-					offset);
 			}
 		} else if (fds[0].revents & ZSOCK_POLLHUP) {
 			/* Connection closed */
@@ -626,9 +633,9 @@ static int http_wait_data(int sock, struct http_request *req, const k_timepoint_
 	/* If there's still some data left in the buffer after HTTP processing,
 	 * reflect this in data_len variable.
 	 */
-	req->data_len = offset;
+	req->data_len = req->internal.offset;
 
-	return total_received;
+	return req->internal.total_received;
 
 closed:
 	LOG_DBG("Connection closed");
@@ -636,9 +643,9 @@ closed:
 	/* If connection was closed with no data sent, this is a NULL response, and is a special
 	 * case valid response.
 	 */
-	if (total_received == 0) {
+	if (req->internal.total_received == 0) {
 		http_report_null(req);
-		return total_received;
+		return req->internal.total_received;
 	}
 
 	/* Otherwise, connection was closed mid-way through response, and this should be
@@ -651,15 +658,15 @@ error:
 	return ret;
 }
 
-int http_client_req(int sock, struct http_request *req,
-		    int32_t timeout, void *user_data)
+int http_client_req_start(int sock, struct http_request *req,
+			  int32_t timeout, void *user_data)
 {
 	/* Utilize the network usage by sending data in bigger blocks */
 	char send_buf[MAX_SEND_BUF_LEN];
 	const size_t send_buf_max_len = sizeof(send_buf);
 	size_t send_buf_pos = 0;
 	int total_sent = 0;
-	int ret, total_recv, i;
+	int ret, i;
 	const char *method;
 	k_timeout_t req_timeout = (timeout == SYS_FOREVER_MS) ? K_FOREVER : K_MSEC(timeout);
 	k_timepoint_t req_end_timepoint = sys_timepoint_calc(req_timeout);
@@ -678,6 +685,8 @@ int http_client_req(int sock, struct http_request *req,
 	req->internal.user_data = user_data;
 	req->internal.sock = sock;
 	req->internal.aborted = false;
+	req->internal.offset = 0;
+	req->internal.total_received = 0;
 
 	method = http_method_str(req->method);
 
@@ -846,18 +855,105 @@ int http_client_req(int sock, struct http_request *req,
 	http_client_init_parser(&req->internal.parser,
 				&req->internal.parser_settings);
 
-	/* Request is sent, now wait data to be received */
-	total_recv = http_wait_data(sock, req, req_end_timepoint);
-	if (total_recv < 0) {
-		NET_DBG("Wait data failure (%d)", total_recv);
-		ret = total_recv;
-		goto out;
-	}
-
-	NET_DBG("Received %d bytes", total_recv);
-
 	return total_sent;
 
 out:
 	return ret;
+}
+
+int http_client_req(int sock, struct http_request *req, int32_t timeout, void *user_data)
+{
+	int ret;
+	int total_recv;
+	k_timeout_t req_timeout = (timeout == SYS_FOREVER_MS) ? K_FOREVER : K_MSEC(timeout);
+	k_timepoint_t req_end_timepoint = sys_timepoint_calc(req_timeout);
+
+	ret = http_client_req_start(sock, req, timeout, user_data);
+	if (ret < 0) {
+		return ret;
+	}
+
+	/* Request is sent, now wait data to be received */
+	total_recv = http_wait_data(sock, req, req_end_timepoint);
+	if (total_recv < 0) {
+		NET_DBG("Wait data failure (%d)", total_recv);
+		return total_recv;
+	}
+
+	NET_DBG("Received %d bytes", total_recv);
+
+	return ret;
+}
+
+int http_client_req_process(struct http_request *req)
+{
+	int ret;
+	struct zsock_pollfd fds[1];
+	int nfds = 1;
+
+	if (req->internal.response.message_complete) {
+		return 1;
+	}
+
+	fds[0].fd = req->internal.sock;
+	fds[0].events = ZSOCK_POLLIN;
+
+	ret = zsock_poll(fds, nfds, 0);
+
+	if (ret == 0) {
+		LOG_DBG("Timeout");
+		return 0;
+	} else if (ret < 0) {
+		return -errno;
+	}
+
+	if (fds[0].revents & ZSOCK_POLLERR) {
+		int sock_err;
+		net_socklen_t optlen = sizeof(sock_err);
+
+		(void)zsock_getsockopt(req->internal.sock, ZSOCK_SOL_SOCKET, ZSOCK_SO_ERROR,
+				       &sock_err, &optlen);
+		return -sock_err;
+	} else if (fds[0].revents & ZSOCK_POLLNVAL) {
+		return -EBADF;
+	} else if (fds[0].revents & ZSOCK_POLLIN) {
+		ret = http_process(req);
+		if (ret == 0) {
+			goto closed;
+		} else if (ret == -EAGAIN) {
+			return 0;
+		} else if (ret < 0) {
+			return ret;
+		}
+	} else if (fds[0].revents & ZSOCK_POLLHUP) {
+		goto closed;
+	}
+
+	if (!req->internal.response.message_complete) {
+		return 0;
+	}
+
+	/* If there's still some data left in the buffer after HTTP processing,
+	 * reflect this in data_len variable.
+	 */
+	req->data_len = req->internal.offset;
+
+	return 1;
+
+closed:
+	LOG_DBG("Connection closed");
+
+	/* If connection was closed with no data sent, this is a NULL response, and is a special
+	 * case valid response.
+	 */
+	if (req->internal.total_received == 0) {
+		http_report_null(req);
+		req->internal.response.message_complete = 1;
+		return 1;
+	}
+
+	/* Otherwise, connection was closed mid-way through response, and this should be
+	 * considered an error.
+	 */
+	return -ECONNRESET;
 }

@@ -1,0 +1,26 @@
+/*
+ * Copyright (c) 2026, inovex GmbH
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Route the MCUmgr ISO-TP transport to the native Linux SocketCAN driver so
+ * that the server and client samples (two separate native_sim processes) can
+ * talk to each other over a shared host CAN interface (e.g. vcan0).
+ *
+ * Adjust "host-interface" to match the interface you created on the host.
+ */
+
+/ {
+	chosen {
+		zephyr,canbus = &can0;
+	};
+};
+
+&can0 {
+	status = "okay";
+	host-interface = "vcan0";
+};
+
+&can_loopback0 {
+	status = "disabled";
+};

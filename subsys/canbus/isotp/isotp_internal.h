@@ -9,6 +9,7 @@
 
 #include <zephyr/canbus/isotp.h>
 #include <zephyr/sys/slist.h>
+#include <zephyr/spinlock.h>
 
 /* Protocol control information*/
 #define ISOTP_PCI_SF 0x00 /* Single frame*/
@@ -93,6 +94,11 @@ enum isotp_tx_state {
 struct isotp_global_ctx {
 	sys_slist_t alloc_list;
 	sys_slist_t ff_sf_alloc_list;
+	/* Bound receive contexts. A send context that expects flow control on the
+	 * address of a bound receive context gets it through that context.
+	 */
+	sys_slist_t bound_list;
+	struct k_spinlock lock;
 };
 
 #ifdef __cplusplus

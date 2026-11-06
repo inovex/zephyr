@@ -92,4 +92,14 @@ config MCUMGR_TRANSPORT_UDP_AUTOMATIC_INIT
 	  application to do this, otherwise will need the user application to manually start and
 	  stop the transport using `smp_udp_open` and `smp_udp_close`.
 
+config MCUMGR_SMP_CLIENT_SHELL_UDP
+	bool "UDP backend for the SMP client shell"
+	depends on MCUMGR_SMP_CLIENT_SHELL
+	default y
+	help
+	  Adds the "smpc udp" subcommands to the MCUmgr SMP client shell
+	  (MCUMGR_SMP_CLIENT_SHELL). "smpc udp target <ip> [port]" selects the
+	  UDP transport and the peer that subsequent SMP client requests are
+	  sent to.
+
 endif # MCUMGR_TRANSPORT_UDP

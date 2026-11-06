@@ -179,6 +179,20 @@ If no custom configuration is needed, simply pass ``NULL`` for the config parame
     HTTP_SERVICE_DEFINE(my_service, "0.0.0.0", &http_service_port, 1, 10,
                         NULL, NULL, NULL);
 
+Runtime service control
+=======================
+
+With the :kconfig:option:`CONFIG_HTTP_SERVER_RUNTIME_SERVICE_CONTROL` the
+ability to enable (start) and disable (stop) individual HTTP services without
+starting/stopping the entire HTTP server is added. This feature is available
+using the :c:func:`http_service_enable` and :c:func:`http_service_disable` APIs.
+The service enable and disable functions can be called while the HTTP server is
+stopped or running. They, together with :c:func:`http_server_start` and
+:c:func:`http_server_stop` should not be called simultaneously from different
+threads. Starting the server with :c:func:`http_server_start` while all services
+are disabled will succeed, with the server not opening any sockets and instead
+waiting for a service to be enabled with :c:func:`http_service_enable`.
+
 Fallback Resources
 ==================
 

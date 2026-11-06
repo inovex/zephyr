@@ -374,9 +374,11 @@ static int setup_service(struct http_service_desc *svc,
 	net_socklen_t len;
 	int fd, af;
 
+#ifdef CONFIG_HTTP_SERVER_RUNTIME_SERVICE_CONTROL
 	if (svc->data->disabled) {
 		return 0;
 	}
+#endif
 
 	/* set the default address (in6addr_any / NET_INADDR_ANY are all 0) */
 	memset(&addr_storage, 0, sizeof(struct net_sockaddr_storage));
@@ -1543,6 +1545,7 @@ static void handle_h3_bidi_stream(struct http_server_ctx *ctx, int i,
 	}
 }
 
+#ifdef CONFIG_HTTP_SERVER_RUNTIME_SERVICE_CONTROL
 static void http_server_rescan_svc(struct http_server_ctx *ctx)
 {
 	int i = 0;
@@ -1593,6 +1596,7 @@ static void http_server_rescan_svc(struct http_server_ctx *ctx)
 		++i;
 	}
 }
+#endif
 
 static int http_server_run(struct http_server_ctx *ctx)
 {
@@ -1638,9 +1642,11 @@ static int http_server_run(struct http_server_ctx *ctx)
 					ret = 0;
 					goto closing;
 				}
+#ifdef CONFIG_HTTP_SERVER_RUNTIME_SERVICE_CONTROL
 				if (cmd.command == HTTP_SERVER_CMD_RESCAN_SERVICES) {
 					http_server_rescan_svc(ctx);
 				}
+#endif
 			}
 		}
 
@@ -2149,6 +2155,7 @@ int http_server_stop(void)
 	return 0;
 }
 
+#ifdef CONFIG_HTTP_SERVER_RUNTIME_SERVICE_CONTROL
 static int http_service_internal_disable(const struct http_service_desc *service, bool disable)
 {
 	int err;
@@ -2179,6 +2186,21 @@ int http_service_disable(const struct http_service_desc *service)
 {
 	return http_service_internal_disable(service, true);
 }
+#else
+int http_service_enable(const struct http_service_desc *service)
+{
+	ARG_UNUSED(service);
+
+	return -ENOTSUP;
+}
+
+int http_service_disable(const struct http_service_desc *service)
+{
+	ARG_UNUSED(service);
+
+	return -ENOTSUP;
+}
+#endif
 
 static void http_server_thread(void *p1, void *p2, void *p3)
 {

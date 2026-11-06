@@ -83,6 +83,8 @@ static int cmd_net_http(const struct shell *sh, size_t argc, char *argv[])
 	PR("\tResource type\tMethods\t\tEnabled\tEndpoint\n");
 
 	HTTP_SERVICE_FOREACH(svc) {
+		const bool svc_enabled = COND_CODE_1(CONFIG_HTTP_SERVER_RUNTIME_SERVICE_CONTROL,
+						     (!svc->data->disabled), (true));
 		char backlog_buf[sizeof("xxxxx/xxxxx")];
 
 		snprintk(backlog_buf, sizeof(backlog_buf), "%zu/%zu",
@@ -93,7 +95,7 @@ static int cmd_net_http(const struct shell *sh, size_t argc, char *argv[])
 		   svc->host == NULL || svc->host[0] == '\0' ?
 		   "<any>" : svc->host, svc->port ? *svc->port : 0,
 		   backlog_buf,
-		   svc->data->disabled ? "no" : "yes",
+		   svc_enabled ? "yes" : "no",
 		   http_protocols_str(svc));
 
 		HTTP_SERVICE_FOREACH_RESOURCE(svc, res) {

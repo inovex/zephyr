@@ -3936,6 +3936,7 @@ static void http_server_tests_before(void *fixture)
 	}
 }
 
+#ifdef CONFIG_HTTP_SERVER_RUNTIME_SERVICE_CONTROL
 /* Tests for enabling/disabling services at runtime */
 
 #define SERVICE_STATE_RETRIES  100
@@ -4132,6 +4133,7 @@ ZTEST(server_function_tests, test_service_disable_enable_stopped)
 	expect_static_get(fd, TEST_STATIC_PAYLOAD_2);
 	(void)zsock_close(fd);
 }
+#endif
 
 static void http_server_tests_after(void *fixture)
 {

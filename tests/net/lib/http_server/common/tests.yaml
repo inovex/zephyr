@@ -9,3 +9,6 @@ common:
     - native_sim
 tests:
   net.http.server.common: {}
+  net.http.server.common.runtime-resource:
+    extra_configs:
+      - CONFIG_HTTP_SERVER_RUNTIME_RESOURCE_CONTROL=y

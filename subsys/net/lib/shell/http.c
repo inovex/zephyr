@@ -98,6 +98,9 @@ static int cmd_net_http(const struct shell *sh, size_t argc, char *argv[])
 
 		HTTP_SERVICE_FOREACH_RESOURCE(svc, res) {
 			struct http_resource_detail *detail = res->detail;
+			const bool res_enabled =
+				COND_CODE_1(CONFIG_HTTP_SERVER_RUNTIME_RESOURCE_CONTROL,
+					    (!detail->disabled), (true));
 			const char *detail_type = "<unknown>";
 			int method_count = 0;
 			bool print_comma;
@@ -134,7 +137,7 @@ static int cmd_net_http(const struct shell *sh, size_t argc, char *argv[])
 				PR("\t");
 			}
 
-			PR("\t%s\t%s\n", detail->disabled ? "no" : "yes", res->resource);
+			PR("\t%s\t%s\n", res_enabled ? "yes" : "no", res->resource);
 			res_count++;
 		}
 

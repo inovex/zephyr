@@ -421,6 +421,7 @@ ZTEST(http_service, test_HTTP_RESOURCE_DEFAULT)
 	zassert_equal(res, RES(0), "Resource mismatch");
 }
 
+#ifdef CONFIG_HTTP_SERVER_RUNTIME_RESOURCE_CONTROL
 ZTEST(http_service, test_HTTP_RESOURCE_DISABLED)
 {
 	struct http_resource_detail *res;
@@ -446,6 +447,7 @@ ZTEST(http_service, test_HTTP_RESOURCE_DISABLED)
 	zassert_equal(res, RES(0), "Resource mismatch");
 	(RES(4))->disabled = false;
 }
+#endif
 
 extern void http_server_get_content_type_from_extension(char *url, char *content_type,
 							size_t content_type_size);

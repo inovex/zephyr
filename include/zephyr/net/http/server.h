@@ -102,7 +102,7 @@ struct http_resource_detail {
 	const char *content_type;
 
 	/** Flag if the resource is disabled. */
-	bool disabled;
+	IF_ENABLED(CONFIG_HTTP_SERVER_RUNTIME_RESOURCE_CONTROL, (bool disabled;))
 };
 
 /** @cond INTERNAL_HIDDEN */

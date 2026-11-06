@@ -481,9 +481,12 @@ example Websocket-based echo service implementation.
 Disabling resources
 ===================
 
-All resources have a ``disabled`` flag in the common section. The flag is set to
-``false`` by default, so all resources are enabled by default. When the flag is
-set to ``true``, the resource is no longer visible to the path lookup
+If individual resources should be enabled and disabled at run time, enable the
+:kconfig:option:`CONFIG_HTTP_SERVER_RUNTIME_RESOURCE_CONTROL` option. All
+resources then have a ``disabled`` flag in the common section. The flag is set
+to ``false`` by default, so all resources are enabled by default, matching the
+behaviour when the runtime resource control is disabled. When the flag is set to
+``true``, the resource is no longer visible to the path lookup
 functions. Depending on the other configuration of the http service, the client
 will receive either a 404 response, or a response from a different resource if
 :kconfig:option:`CONFIG_HTTP_SERVER_RESOURCE_WILDCARD` is enabled or a fallback

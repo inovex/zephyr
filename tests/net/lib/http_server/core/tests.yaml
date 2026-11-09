@@ -18,3 +18,6 @@ tests:
     platform_allow:
       - native_sim
       - qemu_x86
+  net.http.server.core.service-control:
+    extra_configs:
+      - CONFIG_HTTP_SERVER_RUNTIME_SERVICE_CONTROL=y

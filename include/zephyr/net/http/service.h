@@ -67,6 +67,8 @@ struct http_resource_desc {
 
 struct http_service_runtime_data {
 	int num_clients;
+
+	IF_ENABLED(CONFIG_HTTP_SERVER_RUNTIME_SERVICE_CONTROL, (bool disabled;))
 };
 
 struct http_service_desc;

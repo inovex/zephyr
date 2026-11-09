@@ -111,6 +111,10 @@ Libraries / Subsystems
       :c:enumerator:`ETHERNET_HW_STP_PORT_STATE` capability and takes the port state and FDB
       flushes from the protocol.
 
+  * Add :c:func:`http_service_enable` and :c:func:`http_service_disable` to control individual HTTP
+    services at runtime, available when the option
+    :kconfig:option:`CONFIG_HTTP_SERVER_RUNTIME_SERVICE_CONTROL` is enabled.
+
 * PTP Clock
 
   * :c:func:`ptp_clock_adjust_rate` adjusts the clock rate by an offset in scaled parts per

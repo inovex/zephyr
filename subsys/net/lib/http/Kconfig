@@ -351,6 +351,18 @@ config HTTP_SERVER_COMPLETE_STATUS_PHRASES
 	  HTTP specification and their absence does not affect protocol
 	  compliance or client behavior.
 
+config HTTP_SERVER_RUNTIME_RESOURCE_CONTROL
+	bool "HTTP resource runtime control"
+	default n
+	help
+	  Allow controlling the visibility of individual HTTP resources at run time.
+
+config HTTP_SERVER_RUNTIME_SERVICE_CONTROL
+	bool "HTTP service runtime control"
+	default n
+	help
+	  Allow starting and stopping individual HTTP services.
+
 endif
 
 # Hidden option to avoid having multiple individual options that are ORed together

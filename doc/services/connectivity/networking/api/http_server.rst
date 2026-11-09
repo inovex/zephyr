@@ -179,6 +179,20 @@ If no custom configuration is needed, simply pass ``NULL`` for the config parame
     HTTP_SERVICE_DEFINE(my_service, "0.0.0.0", &http_service_port, 1, 10,
                         NULL, NULL, NULL);
 
+Runtime service control
+=======================
+
+With the :kconfig:option:`CONFIG_HTTP_SERVER_RUNTIME_SERVICE_CONTROL` the
+ability to enable (start) and disable (stop) individual HTTP services without
+starting/stopping the entire HTTP server is added. This feature is available
+using the :c:func:`http_service_enable` and :c:func:`http_service_disable` APIs.
+The service enable and disable functions can be called while the HTTP server is
+stopped or running. They, together with :c:func:`http_server_start` and
+:c:func:`http_server_stop` should not be called simultaneously from different
+threads. Starting the server with :c:func:`http_server_start` while all services
+are disabled will succeed, with the server not opening any sockets and instead
+waiting for a service to be enabled with :c:func:`http_service_enable`.
+
 Fallback Resources
 ==================
 
@@ -477,6 +491,22 @@ a simple callback, used only to store the socket descriptor provided. Further
 processing of the Websocket connection is application-specific, hence outside
 of scope of this guide. See :zephyr:code-sample:`sockets-http-server` for an
 example Websocket-based echo service implementation.
+
+Disabling resources
+===================
+
+If individual resources should be enabled and disabled at run time, enable the
+:kconfig:option:`CONFIG_HTTP_SERVER_RUNTIME_RESOURCE_CONTROL` option. All
+resources then have a ``disabled`` flag in the common section. The flag is set
+to ``false`` by default, so all resources are enabled by default, matching the
+behaviour when the runtime resource control is disabled. When the flag is set to
+``true``, the resource is no longer visible to the path lookup
+functions. Depending on the other configuration of the http service, the client
+will receive either a 404 response, or a response from a different resource if
+:kconfig:option:`CONFIG_HTTP_SERVER_RESOURCE_WILDCARD` is enabled or a fallback
+resource is registered.
+
+For the fallback resource itself, the ``disabled`` flag is ignored.
 
 .. _http_server_interface_accessing_request_headers:
 

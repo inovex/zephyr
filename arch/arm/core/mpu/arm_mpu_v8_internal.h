@@ -723,6 +723,29 @@ static int mpu_mark_areas_for_dynamic_regions(
 		/* Store default configuration */
 		mpu_region_get_conf(dyn_reg_info[i].index,
 			&dyn_reg_info[i].region_conf);
+
+#ifndef CONFIG_MPU_GAP_FILLING
+		/* We are going to skip the full partition of the background areas. So the MPU
+		 * regions inside which dynamic memory regions may be programmed can be freed to be
+		 * reused by dynamic regions. Optimize the region ordering to ensure that the
+		 * background region is at the end, and then remove it from static_regions_num to
+		 * avoid wasting one MPU region.
+		 */
+		if (dyn_reg_info[i].index != static_regions_num - 1) {
+			struct arm_mpu_region swap_region;
+			int ret;
+
+			mpu_region_get_conf(static_regions_num - 1, &swap_region);
+			mpu_clear_region(static_regions_num - 1);
+			mpu_clear_region(dyn_reg_info[i].index);
+			ret = region_allocate_and_init(dyn_reg_info[i].index, &swap_region);
+			if (ret < 0) {
+				return ret;
+			}
+			dyn_reg_info[i].index = static_regions_num - 1;
+		}
+		--static_regions_num;
+#endif
 	}
 
 	return 0;
@@ -770,15 +793,6 @@ static int mpu_configure_dynamic_mpu_regions(const struct z_arm_mpu_partition
 	mpu_reg_index = mpu_configure_regions_and_partition(dynamic_regions,
 		regions_num, mpu_reg_index, true);
 #else
-
-	/* We are going to skip the full partition of the background areas.
-	 * So we can disable MPU regions inside which dynamic memory regions
-	 * may be programmed.
-	 */
-	for (int i = 0; i < MPU_DYNAMIC_REGION_AREAS_NUM; i++) {
-		mpu_clear_region(dyn_reg_info[i].index);
-	}
-
 	/* The dynamic regions are now programmed on top of
 	 * existing SRAM region configuration.
 	 */

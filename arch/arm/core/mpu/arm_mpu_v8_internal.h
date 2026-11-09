@@ -522,6 +522,99 @@ static int mpu_configure_regions(const struct z_arm_mpu_partition
 	bool do_coherence_check);
 #endif
 
+/* This function checks if the new region can be merged with an existing region in the range
+ * [merge_start..index).
+ *
+ * Returns index of mergeable region if found, -1 if no merge possible
+ */
+static int mpu_find_merge_region(const uint8_t search_range, const uint8_t merge_start,
+				 const struct z_arm_mpu_partition *new_region)
+{
+	int i;
+
+	for (i = merge_start; i < search_range; i++) {
+		uint32_t u_reg_base = mpu_region_get_base(i);
+		uint32_t u_reg_last = mpu_region_get_last_addr(i);
+		uint32_t reg_last = new_region->start + new_region->size - 1;
+
+		if (new_region->start == u_reg_last + 1 || reg_last + 1 == u_reg_base) {
+			arm_mpu_region_attr_t merge_attr, new_attr;
+
+			mpu_region_get_access_attr(i, &merge_attr);
+			get_region_attr_from_mpu_partition_info(
+				&new_attr, &new_region->attr, new_region->start, new_region->size);
+			if (merge_attr.rbar != new_attr.rbar ||
+			    merge_attr.mair_idx != new_attr.mair_idx) {
+				continue;
+			}
+#ifdef CONFIG_ARM_MPU_PXN
+			if (merge_attr.pxn != new_attr.pxn) {
+				continue;
+			}
+#endif
+			return i;
+		}
+	}
+
+	return -1;
+}
+
+/* This function checks if the new region can be merged with an existing region in the range
+ * [merge_start..index). If it is not mergeable, it is allocated into the provided index. If it is
+ * mergeable, the region is merged and the provided index remains free.
+ *
+ * If the attributes of the new region are identical to those of the underlying region, it may be
+ * merged back into the region mpu_configure_regions_and_partition just split up. In the
+ * CONFIG_MPU_GAP_FILLING=n case, this underlying region may be removed later if it is (one of the)
+ * dynamic regions. This should not be a problem, as a) we can assume that the attributes of any
+ * configured region differ from the dynamic region, and b) the attributes of the dynamic region
+ * match the attributes of the background map, so this should not change observable behavior.
+ *
+ * Returns the index of the merged region, or 'index' if a new region was allocated at 'index', or
+ * negative errno on failure.
+ */
+static int mpu_merge_or_configure_region(const uint8_t index, const uint8_t merge_start,
+					 const struct z_arm_mpu_partition *new_region)
+{
+	int i;
+
+	i = mpu_find_merge_region(index, merge_start, new_region);
+	if (i >= 0) {
+		/* Match found, we can merge */
+		uint32_t u_reg_last = mpu_region_get_last_addr(i);
+		uint32_t reg_last = new_region->start + new_region->size - 1;
+
+		if (new_region->start == u_reg_last + 1) {
+			mpu_region_set_limit(i, reg_last);
+		} else {
+			mpu_region_set_base(i, new_region->start);
+		}
+		return i;
+	}
+
+	return mpu_configure_region(index, new_region);
+}
+
+static int swap_regions(const int a, const int b)
+{
+	struct arm_mpu_region a_region, b_region;
+	int ret;
+
+	if (a == b) {
+		return 0;
+	}
+
+	mpu_region_get_conf(a, &a_region);
+	mpu_region_get_conf(b, &b_region);
+	mpu_clear_region(a);
+	mpu_clear_region(b);
+	ret = region_allocate_and_init(b, &a_region);
+	if (ret < 0) {
+		return ret;
+	}
+	return region_allocate_and_init(a, &b_region);
+}
+
 /* This internal function programs a set of given MPU regions
  * over a background memory area, optionally performing a
  * coherence check of the memory regions to be programmed.
@@ -530,11 +623,12 @@ static int mpu_configure_regions(const struct z_arm_mpu_partition
  * area, effectively, leaving no space in this area uncovered by MPU.
  */
 static int mpu_configure_regions_and_partition(const struct z_arm_mpu_partition
-	regions[], uint8_t regions_num, uint8_t start_reg_index,
+	regions[], uint8_t regions_num, uint8_t start_reg_index, uint8_t merge_start,
 	bool do_coherence_check)
 {
 	int i;
 	int reg_index = start_reg_index;
+	int ret;
 
 	for (i = 0; i < regions_num; i++) {
 		if (regions[i].size == 0U) {
@@ -569,15 +663,42 @@ static int mpu_configure_regions_and_partition(const struct z_arm_mpu_partition
 		uint32_t u_reg_last = mpu_region_get_last_addr(u_reg_index);
 		uint32_t reg_last = regions[i].start + regions[i].size - 1;
 
-		if ((regions[i].start == u_reg_base) &&
-			(reg_last == u_reg_last)) {
+		if ((regions[i].start == u_reg_base) && (reg_last == u_reg_last)) {
 			/* The new region overlaps entirely with the
-			 * underlying region. In this case we simply
-			 * update the partition attributes of the
-			 * underlying region with those of the new
-			 * region.
+			 * underlying region.
 			 */
-			mpu_configure_region(u_reg_index, &regions[i]);
+			int merge_region =
+				mpu_find_merge_region(reg_index, merge_start, &regions[i]);
+
+			if (merge_region < 0) {
+				/* No merge with an adjacent region is possible. In this case we
+				 * simply update the partition attributes of the underlying region
+				 * with those of the new region.
+				 */
+				mpu_configure_region(u_reg_index, &regions[i]);
+			} else {
+				/* The regions can be merged with an adjacent region. This
+				 * underlying region will be freed.  Ensure it is in the last slot
+				 * by swapping if necessary, so that the region slot can be reused.
+				 */
+				ret = swap_regions(u_reg_index, reg_index - 1);
+				if (ret < 0) {
+					return ret;
+				}
+				mpu_clear_region(reg_index - 1);
+				ret = mpu_merge_or_configure_region(reg_index - 1, merge_start,
+								    &regions[i]);
+				if (ret == -EINVAL) {
+					return ret;
+				} else if (ret == reg_index - 1) {
+					/* We should have been able to merge based on previous
+					 * checks, but a new region was allocated?
+					 */
+					return -EINVAL;
+				}
+
+				--reg_index;
+			}
 		} else if (regions[i].start == u_reg_base) {
 			/* The new region starts exactly at the start of the
 			 * underlying region; the start of the underlying
@@ -586,14 +707,13 @@ static int mpu_configure_regions_and_partition(const struct z_arm_mpu_partition
 			mpu_region_set_base(u_reg_index,
 				regions[i].start + regions[i].size);
 
-			reg_index =
-				mpu_configure_region(reg_index, &regions[i]);
+			ret = mpu_merge_or_configure_region(reg_index, merge_start, &regions[i]);
 
-			if (reg_index == -EINVAL) {
-				return reg_index;
+			if (ret == -EINVAL) {
+				return ret;
+			} else if (ret == reg_index) {
+				reg_index++;
 			}
-
-			reg_index++;
 		} else if (reg_last == u_reg_last) {
 			/* The new region ends exactly at the end of the
 			 * underlying region; the end of the underlying
@@ -603,14 +723,13 @@ static int mpu_configure_regions_and_partition(const struct z_arm_mpu_partition
 			mpu_region_set_limit(u_reg_index,
 				regions[i].start - 1);
 
-			reg_index =
-				mpu_configure_region(reg_index, &regions[i]);
+			ret = mpu_merge_or_configure_region(reg_index, merge_start, &regions[i]);
 
-			if (reg_index == -EINVAL) {
-				return reg_index;
+			if (ret == -EINVAL) {
+				return ret;
+			} else if (ret == reg_index) {
+				reg_index++;
 			}
-
-			reg_index++;
 		} else {
 			/* The new regions lies strictly inside the
 			 * underlying region, which needs to split
@@ -619,13 +738,13 @@ static int mpu_configure_regions_and_partition(const struct z_arm_mpu_partition
 			mpu_region_set_limit(u_reg_index,
 				regions[i].start - 1);
 
-			reg_index =
-				mpu_configure_region(reg_index, &regions[i]);
+			ret = mpu_merge_or_configure_region(reg_index, merge_start, &regions[i]);
 
-			if (reg_index == -EINVAL) {
-				return reg_index;
+			if (ret == -EINVAL) {
+				return ret;
+			} else if (ret == reg_index) {
+				reg_index++;
 			}
-			reg_index++;
 
 			/* The additional region shall have the same
 			 * access attributes as the initial underlying
@@ -680,7 +799,7 @@ static int mpu_configure_static_mpu_regions(const struct z_arm_mpu_partition
 	ARG_UNUSED(background_area_end);
 
 	mpu_reg_index = mpu_configure_regions_and_partition(static_regions,
-		regions_num, mpu_reg_index, true);
+		regions_num, mpu_reg_index, 0, true);
 
 	static_regions_num = mpu_reg_index;
 
@@ -732,13 +851,9 @@ static int mpu_mark_areas_for_dynamic_regions(
 		 * avoid wasting one MPU region.
 		 */
 		if (dyn_reg_info[i].index != static_regions_num - 1) {
-			struct arm_mpu_region swap_region;
 			int ret;
 
-			mpu_region_get_conf(static_regions_num - 1, &swap_region);
-			mpu_clear_region(static_regions_num - 1);
-			mpu_clear_region(dyn_reg_info[i].index);
-			ret = region_allocate_and_init(dyn_reg_info[i].index, &swap_region);
+			ret = swap_regions(static_regions_num - 1, dyn_reg_info[i].index);
 			if (ret < 0) {
 				return ret;
 			}
@@ -791,7 +906,7 @@ static int mpu_configure_dynamic_mpu_regions(const struct z_arm_mpu_partition
 	 * given boundaries.
 	 */
 	mpu_reg_index = mpu_configure_regions_and_partition(dynamic_regions,
-		regions_num, mpu_reg_index, true);
+		regions_num, mpu_reg_index, mpu_reg_index, true);
 #else
 	/* The dynamic regions are now programmed on top of
 	 * existing SRAM region configuration.

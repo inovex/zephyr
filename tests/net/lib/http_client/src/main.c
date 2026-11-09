@@ -387,6 +387,177 @@ ZTEST(http_client, test_http1_client_post_payload_cb)
 			  "Invalid payload uploaded %zu", dynamic_len);
 }
 
+/* Drive a request started with http_client_req_start() to completion by
+ * polling on the socket and calling http_client_req_process().
+ */
+static int process_until_done(int sock, struct http_request *req)
+{
+	struct zsock_pollfd fds = { .fd = sock, .events = ZSOCK_POLLIN };
+	int64_t end = k_uptime_get() + 5000;
+	int ret;
+
+	do {
+		ret = http_client_req_process(req);
+		if (ret != 0) {
+			return ret;
+		}
+
+		(void)zsock_poll(&fds, 1, 100);
+	} while (k_uptime_get() < end);
+
+	return -ETIMEDOUT;
+}
+
+ZTEST(http_client, test_http1_client_req_start_process_get)
+{
+	struct http_request req = { 0 };
+	struct test_ctx ctx = { 0 };
+	int ret;
+
+	common_request_init(&req);
+	req.method = HTTP_GET;
+	req.url = "/static";
+
+	ctx.buf = response_buf;
+	ctx.buflen = sizeof(response_buf);
+
+	ret = http_client_req_start(client_fd, &req, -1, &ctx);
+	zassert_true(ret > 0, "http_client_req_start() failed (%d)", ret);
+
+	ret = process_until_done(client_fd, &req);
+	zassert_true(ret > 0, "http_client_req_process() failed (%d)", ret);
+	zassert_true(ctx.final, "No final event received");
+	zassert_equal(ctx.status, 200, "Unexpected HTTP status code");
+	zassert_equal(ctx.offset, strlen(static_resource_payload),
+		      "Invalid payload length");
+	zassert_mem_equal(response_buf, static_resource_payload, ctx.offset,
+			  "Invalid payload");
+}
+
+ZTEST(http_client, test_http1_client_req_start_process_post)
+{
+	struct http_request req = { 0 };
+	struct test_ctx ctx = { 0 };
+	int ret;
+
+	common_request_init(&req);
+	req.method = HTTP_POST;
+	req.url = "/dynamic";
+	req.payload = LOREM_IPSUM;
+	req.payload_len = LOREM_IPSUM_STRLEN;
+
+	ret = http_client_req_start(client_fd, &req, -1, &ctx);
+	zassert_true(ret > 0, "http_client_req_start() failed (%d)", ret);
+
+	ret = process_until_done(client_fd, &req);
+	zassert_true(ret > 0, "http_client_req_process() failed (%d)", ret);
+	zassert_true(ctx.final, "No final event received");
+	zassert_equal(ctx.status, 200, "Unexpected HTTP status code");
+	zassert_equal(dynamic_len, LOREM_IPSUM_STRLEN,
+		      "Invalid payload length uploaded");
+	zassert_mem_equal(dynamic_buf, LOREM_IPSUM, dynamic_len,
+			  "Invalid payload uploaded");
+}
+
+ZTEST(http_client, test_http1_client_req_process_nodata)
+{
+	struct http_request req = { 0 };
+	struct test_ctx ctx = { 0 };
+	int ret;
+
+	common_request_init(&req);
+	req.method = HTTP_GET;
+	req.url = "/static";
+
+	ret = http_client_req_start(client_fd, &req, -1, &ctx);
+	zassert_true(ret > 0, "http_client_req_start() failed (%d)", ret);
+
+	/* Process is non-blocking: it must return promptly, never with an
+	 * error, and never report completion before the response was read.
+	 */
+	ret = http_client_req_process(&req);
+	zassert_true(ret >= 0, "http_client_req_process() failed (%d)", ret);
+	if (ret == 0) {
+		zassert_false(ctx.final, "Final event without completion");
+	}
+
+	ret = process_until_done(client_fd, &req);
+	zassert_true(ret > 0, "http_client_req_process() failed (%d)", ret);
+	zassert_true(ctx.final, "No final event received");
+}
+
+ZTEST(http_client, test_http1_client_req_process_abort)
+{
+	struct http_request req = { 0 };
+	struct test_ctx ctx = { 0 };
+	int ret;
+
+	common_request_init(&req);
+	req.method = HTTP_GET;
+	req.url = "/static";
+
+	ctx.abort = true;
+
+	ret = http_client_req_start(client_fd, &req, -1, &ctx);
+	zassert_true(ret > 0, "http_client_req_start() failed (%d)", ret);
+
+	ret = process_until_done(client_fd, &req);
+	zassert_equal(ret, -ECONNABORTED,
+		      "http_client_req_process() should've reported abort (%d)", ret);
+}
+
+ZTEST(http_client, test_http1_client_req_process_null_response)
+{
+	struct http_request req = { 0 };
+	struct test_ctx ctx = { 0 };
+	int ret;
+
+	common_request_init(&req);
+	req.method = HTTP_GET;
+	req.url = "/static";
+
+	ret = http_client_req_start(client_fd, &req, -1, &ctx);
+	zassert_true(ret > 0, "http_client_req_start() failed (%d)", ret);
+
+	/* Stop the server, which closes the connection. */
+	(void)http_server_stop();
+
+	/* Connection closed before any response data was received: this is a
+	 * valid NULL response, reported as complete with status code 0.
+	 */
+	ret = process_until_done(client_fd, &req);
+	zassert_equal(ret, 1, "NULL response not reported as complete (%d)", ret);
+	zassert_true(ctx.final, "No final event received for NULL response");
+	zassert_equal(ctx.status, 0, "Unexpected status for NULL response");
+	zassert_equal(ctx.offset, 0, "Unexpected body in NULL response");
+}
+
+ZTEST(http_client, test_http1_client_req_start_invalid)
+{
+	struct http_request req = { 0 };
+	struct test_ctx ctx = { 0 };
+	int ret;
+
+	common_request_init(&req);
+	req.method = HTTP_GET;
+	req.url = "/static";
+
+	ret = http_client_req_start(-1, &req, -1, &ctx);
+	zassert_equal(ret, -EINVAL, "Invalid socket not rejected (%d)", ret);
+
+	ret = http_client_req_start(client_fd, NULL, -1, &ctx);
+	zassert_equal(ret, -EINVAL, "NULL request not rejected (%d)", ret);
+
+	req.recv_buf = NULL;
+	ret = http_client_req_start(client_fd, &req, -1, &ctx);
+	zassert_equal(ret, -EINVAL, "NULL recv_buf not rejected (%d)", ret);
+
+	common_request_init(&req);
+	req.response = NULL;
+	ret = http_client_req_start(client_fd, &req, -1, &ctx);
+	zassert_equal(ret, -EINVAL, "NULL response cb not rejected (%d)", ret);
+}
+
 static void client_tests_before(void *fixture)
 {
 	struct net_sockaddr_in6 sa;

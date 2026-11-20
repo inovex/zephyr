@@ -141,6 +141,14 @@ SECTIONS
 
 	} GROUP_LINK_IN(ROMSTART_REGION)
 
+#if defined(CONFIG_ARCH_HAS_RAMFUNC_SUPPORT) && defined(CONFIG_CODE_DATA_RELOCATION_SRAM)
+/* Place .ramfunc ahead of the relocated RAM text and rodata, so that the (not
+ * MPU-aligned) relocated rodata ends up adjacent to the remaining SRAM instead
+ * of leaving an unmergeable gap between two executable MPU regions.
+ */
+#include <../arch/common/ramfunc.ld>
+#endif
+
 #ifdef CONFIG_CODE_DATA_RELOCATION
 
 #include <linker_relocate.ld>

@@ -408,6 +408,7 @@ def string_create_helper(
                 if region_is_default_ram(memory_type) and kind in (
                     SectionKind.TEXT,
                     SectionKind.LITERAL,
+                    SectionKind.RODATA,
                 ):
                     linker_string += LINKER_SECTION_SEQ_MPU.format(align_size=0, **fields)
                 else:

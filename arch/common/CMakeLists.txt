@@ -80,10 +80,13 @@ endif()
 
 zephyr_linker_section_configure(SECTION /DISCARD/ INPUT ".note.GNU-stack")
 
-zephyr_linker_sources_ifdef(CONFIG_ARCH_HAS_RAMFUNC_SUPPORT
-  RAM_SECTIONS
-  ramfunc.ld
-)
+# The Cortex-M linker script places .ramfunc itself when relocating to SRAM.
+if(NOT (CONFIG_CPU_CORTEX_M AND CONFIG_CODE_DATA_RELOCATION_SRAM))
+  zephyr_linker_sources_ifdef(CONFIG_ARCH_HAS_RAMFUNC_SUPPORT
+    RAM_SECTIONS
+    ramfunc.ld
+  )
+endif()
 
 zephyr_linker_sources_ifdef(CONFIG_NOCACHE_MEMORY
   RAM_SECTIONS
